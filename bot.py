@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
-
+import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest, TimedOut, NetworkError
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -612,10 +612,13 @@ async def bank_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=home_menu(sess),
     )
 
+
 async def run():
     init_db()
 
-    TOKEN = "BOT_TOKEN"
+    TOKEN = os.getenv("BOT_TOKEN")
+    if not TOKEN:
+        raise RuntimeError("Falta BOT_TOKEN en Render")
 
     request = HTTPXRequest(
         connect_timeout=20.0,
@@ -633,17 +636,7 @@ async def run():
 
     print("✅ Bot iniciado correctamente...")
 
-    await app.initialize()
-    await app.start()
-    await app.bot.delete_webhook(drop_pending_updates=True)
-    await app.updater.start_polling()
-
-    try:
-        await asyncio.Event().wait()
-    finally:
-        await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
+    await app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     asyncio.run(run())
