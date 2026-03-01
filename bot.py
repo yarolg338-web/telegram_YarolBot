@@ -637,5 +637,6 @@ async def run():
     print("✅ Bot iniciado correctamente...")
 
     await app.run_polling(drop_pending_updates=True)
+    
     if __name__ == "__main__":
         asyncio.run(run())
