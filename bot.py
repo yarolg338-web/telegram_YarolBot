@@ -508,22 +508,18 @@ def stats_text(seq: List[str], sess: SessionState) -> str:
         f"🟠 Tie: {t} ({t/total*100:.1f}%)\n"
         f"🧠 Ventana {len(win)}: ChopRate {chop_rate(win):.2f} | Ties {count_ties(win)}/{len(win)}\n"
     )
-
     if sess.is_active:
         txt += (
             f"\n🏦 Sesión activa | Banca: {sess.bank_current:.0f} | Base: {sess.base_bet:.0f} | Gale: {sess.gale_level}/{MAX_GALE}\n"
             f"🎯 {session_limits_text(sess)}\n"
             f"🧯 Anti-tilt cooldown: {sess.danger_cooldown}"
         )
-        if sess.awaiting_outcome and sess.pending_side in ("P", "B"):
-            txt += f"\n⏳ Apuesta pendiente: {side_label(sess.pending_side)} por {sess.pending_bet:.0f}"
     return txt
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sess = get_session()
     await update.message.reply_text(
-        "🤖 Bac Bo Bot (Modo Canal estilo AnaPrime)\n"
-        "✅ Tú registras resultados y el bot publica señales en tu canal.\n",
+        "🤖 Bac Bo Bot\n✅ Tú registras resultados y el bot publica señales en tu canal.\n",
         reply_markup=home_menu(sess),
     )
 
@@ -533,27 +529,8 @@ async def handle_reco(context: ContextTypes.DEFAULT_TYPE) -> str:
 
     action, detail = decide_action(seq, sess)
 
-    win = seq[-WINDOW_N:] if len(seq) >= WINDOW_N else seq[:]
-    cr = chop_rate(win)
-    streak_side, streak_len = current_streak(win)
-    ties = count_ties(win)
-
-    bank_line = ""
-    if sess.is_active:
-        bank_line = (
-            f"\n🏦 Banca: {sess.bank_current:.0f} | Gale: {sess.gale_level}/{MAX_GALE} | Anti-tilt: {sess.danger_cooldown}"
-            f"\n🎯 {session_limits_text(sess)}"
-        )
-
     if action == "NO_BET":
-        if sess.is_active:
-            set_session(pending_side=None, pending_bet=0, awaiting_outcome=0)
-        return (
-            f"🚫 NO APOSTAR\n"
-            f"🧠 {detail}\n"
-            f"📌 Ventana: {len(win)} | ChopRate: {cr:.2f} | Racha: {streak_side or '-'} x{streak_len} | Ties: {ties}/{len(win)}"
-            f"{bank_line}"
-        )
+        return f"🚫 NO APOSTAR\n🧠 {detail}"
 
     side = "P" if action == "BET_P" else "B"
 
@@ -562,21 +539,7 @@ async def handle_reco(context: ContextTypes.DEFAULT_TYPE) -> str:
         if channel_id:
             context.application.create_task(schedule_entry_flow(context.application, channel_id))
 
-    bet_line = ""
-    if sess.is_active:
-        bet_preview = calc_next_bet(sess)
-        bet_line = f"\n💵 Próxima apuesta estimada: {bet_preview:.0f} a {side_label(side)} (se confirma en canal)"
-    else:
-        bet_line = "\nℹ️ Inicia sesión con /bank <monto> para publicar al canal."
-
-    return (
-        f"✅ POSIBLE APOSTAR\n"
-        f"➡️ Recomendación: {side_label(side)}\n"
-        f"🧠 {detail}\n"
-        f"📌 Ventana: {len(win)} | ChopRate: {cr:.2f} | Racha: {streak_side or '-'} x{streak_len} | Ties: {ties}/{len(win)}"
-        f"{bet_line}"
-        f"{bank_line}"
-    )
+    return f"✅ POSIBLE APOSTAR\n➡️ Recomendación: {side_label(side)}\n🧠 {detail}"
 
 async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -596,10 +559,6 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = data.split("_", 1)[1]
         add_round(result)
 
-        sess_now = get_session()
-        if sess_now.danger_cooldown > 0:
-            set_session(danger_cooldown=max(0, sess_now.danger_cooldown - 1))
-
         sess_before = get_session()
         sess_after, outcome_txt, outcome_kind = settle_pending_bet(sess_before, result)
 
@@ -610,28 +569,9 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 send_result_reply(context.application, channel_id, reply_to, outcome_kind, result)
             )
 
-        stop_hit = check_stop_take(sess_after)
-        if stop_hit == "STOP_LOSS":
-            final_bank = sess_after.bank_current
-            stop_session()
-            await safe_edit(q, f"⛔ STOP LOSS alcanzado. Sesión cerrada.\nBanca final: {final_bank:.0f}",
-                            reply_markup=home_menu(get_session()))
-            return
-        if stop_hit == "TAKE_PROFIT":
-            final_bank = sess_after.bank_current
-            stop_session()
-            await safe_edit(q, f"✅ TAKE PROFIT alcanzado. Sesión cerrada.\nBanca final: {final_bank:.0f}",
-                            reply_markup=home_menu(get_session()))
-            return
-
         reco_txt = await handle_reco(context)
-        header = f"✅ Guardado: {result_ball(result)} ({result})"
-        parts = [header]
-        if outcome_txt:
-            parts.append(outcome_txt)
-        parts.append(reco_txt)
-
-        await safe_edit(q, "\n\n".join(parts), reply_markup=home_menu(get_session()))
+        await safe_edit(q, f"✅ Guardado: {result_ball(result)} ({result})\n\n{outcome_txt}\n\n{reco_txt}",
+                        reply_markup=home_menu(get_session()))
         return
 
     if data == "menu_reco":
@@ -646,12 +586,8 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "menu_session_start":
-        await safe_edit(
-            q,
-            "Para iniciar sesión envía: /bank <monto>\nEj: /bank 300000\n\n"
-            f"📌 El bot calcula {BASE_BET_PCT:.1f}% y lo redondea a fichas Evolution.",
-            reply_markup=home_menu(sess),
-        )
+        await safe_edit(q, "Para iniciar sesión envía: /bank <monto>\nEj: /bank 300000",
+                        reply_markup=home_menu(sess))
         return
 
     if data == "menu_session_stop":
@@ -692,9 +628,9 @@ async def bank_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sess = get_session()
     await update.message.reply_text(
         f"🏦 Sesión iniciada.\nBanca: {sess.bank_current:.0f}\n"
-        f"Riesgo: {BASE_BET_PCT:.1f}% (redondeado a ficha)\n"
+        f"Riesgo: {BASE_BET_PCT:.1f}%\n"
         f"Apuesta base: {sess.base_bet:.0f}\n"
-        f"Max gale: {MAX_GALE} (por escalón)\n"
+        f"Max gale: {MAX_GALE}\n"
         f"🎯 {session_limits_text(sess)}",
         reply_markup=home_menu(sess),
     )
@@ -706,8 +642,8 @@ flask_app = Flask(__name__)
 def home():
     return "OK - Bacbo bot activo ✅", 200
 
-# ====== Telegram runner (MAIN THREAD) ======
-async def start_bot():
+# ====== Arranque correcto (SIN asyncio.run + run_polling) ======
+def start_bot_sync():
     init_db()
 
     token = os.getenv("BOT_TOKEN")
@@ -728,12 +664,11 @@ async def start_bot():
     app.add_error_handler(error_handler)
 
     logging.info("✅ Bot iniciado (polling)...")
-    await app.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=True)
 
 def main():
     port = int(os.getenv("PORT", "10000"))
 
-    # Flask en thread, Telegram en el hilo principal (evita set_wakeup_fd error)
     from threading import Thread
 
     def run_web():
@@ -741,7 +676,8 @@ def main():
 
     Thread(target=run_web, daemon=True).start()
 
-    asyncio.run(start_bot())
+    # Telegram EN MAIN THREAD
+    start_bot_sync()
 
 if __name__ == "__main__":
     main()
