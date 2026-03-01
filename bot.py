@@ -413,7 +413,6 @@ async def send_result_reply(app: Application, channel_id: int, reply_to_id: Opti
     except Exception as e:
         logging.exception("No pude enviar resultado al canal: %s", e)
 
-    # Si configuraste una imagen (como tu GREEN), la mandamos también
     if photo_id:
         try:
             await app.bot.send_photo(
@@ -426,12 +425,6 @@ async def send_result_reply(app: Application, channel_id: int, reply_to_id: Opti
             logging.warning("No pude enviar foto GREEN/RED/TIE (opcional): %s", e)
 
 async def schedule_entry_flow(app: Application, channel_id: int):
-    """
-    - Envía POSIBLE ENTRADA
-    - Espera ALERT_DELAY_SECONDS
-    - Re-evalúa: si NO_BET → borra posible y ya
-      si BET → borra posible, manda confirmada y arma apuesta pendiente
-    """
     possible_id = await send_possible_entry(app, channel_id)
     if possible_id:
         set_session(last_alert_msg_id=possible_id)
@@ -442,7 +435,6 @@ async def schedule_entry_flow(app: Application, channel_id: int):
     sess = get_session()
     action, _detail = decide_action(seq, sess)
 
-    # Si ya no aplica o ya hay una apuesta pendiente, se borra posible y se cancela
     if action == "NO_BET" or sess.awaiting_outcome:
         if possible_id:
             await safe_delete(app.bot, channel_id, possible_id)
@@ -459,7 +451,6 @@ async def schedule_entry_flow(app: Application, channel_id: int):
     if confirm_id:
         set_session(last_confirm_msg_id=confirm_id)
 
-    # Armar apuesta pendiente (solo si sesión activa)
     sess2 = get_session()
     if sess2.is_active:
         bet = calc_next_bet(sess2)
@@ -532,9 +523,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sess = get_session()
     await update.message.reply_text(
         "🤖 Bac Bo Bot (Modo Canal estilo AnaPrime)\n"
-        "✅ Tú registras resultados y el bot publica señales en tu canal.\n"
-        "🎰 Fichas Evolution: 5k/10k/25k/125k/500k/2.5M\n"
-        "🧯 Anti-tilt: bloquea mesa peligrosa automáticamente.",
+        "✅ Tú registras resultados y el bot publica señales en tu canal.\n",
         reply_markup=home_menu(sess),
     )
 
@@ -568,7 +557,6 @@ async def handle_reco(context: ContextTypes.DEFAULT_TYPE) -> str:
 
     side = "P" if action == "BET_P" else "B"
 
-    # Publicar estilo canal si sesión activa y no hay apuesta pendiente
     if sess.is_active and not sess.awaiting_outcome:
         channel_id = int(os.getenv("CHANNEL_ID", "0"))
         if channel_id:
@@ -605,19 +593,16 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("add_"):
-        result = data.split("_", 1)[1]  # P/B/T
+        result = data.split("_", 1)[1]
         add_round(result)
 
-        # bajar cooldown
         sess_now = get_session()
         if sess_now.danger_cooldown > 0:
             set_session(danger_cooldown=max(0, sess_now.danger_cooldown - 1))
 
-        # liquidar apuesta pendiente
         sess_before = get_session()
         sess_after, outcome_txt, outcome_kind = settle_pending_bet(sess_before, result)
 
-        # publicar GREEN/RED/TIE al canal respondiendo a ENTRADA CONFIRMADA
         channel_id = int(os.getenv("CHANNEL_ID", "0"))
         if channel_id and outcome_kind:
             reply_to = sess_before.last_confirm_msg_id
@@ -625,23 +610,21 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 send_result_reply(context.application, channel_id, reply_to, outcome_kind, result)
             )
 
-        # stop/take
         stop_hit = check_stop_take(sess_after)
         if stop_hit == "STOP_LOSS":
             final_bank = sess_after.bank_current
             stop_session()
-            txt = f"⛔ STOP LOSS alcanzado. Sesión cerrada.\nBanca final: {final_bank:.0f}"
-            await safe_edit(q, txt, reply_markup=home_menu(get_session()))
+            await safe_edit(q, f"⛔ STOP LOSS alcanzado. Sesión cerrada.\nBanca final: {final_bank:.0f}",
+                            reply_markup=home_menu(get_session()))
             return
         if stop_hit == "TAKE_PROFIT":
             final_bank = sess_after.bank_current
             stop_session()
-            txt = f"✅ TAKE PROFIT alcanzado. Sesión cerrada.\nBanca final: {final_bank:.0f}"
-            await safe_edit(q, txt, reply_markup=home_menu(get_session()))
+            await safe_edit(q, f"✅ TAKE PROFIT alcanzado. Sesión cerrada.\nBanca final: {final_bank:.0f}",
+                            reply_markup=home_menu(get_session()))
             return
 
         reco_txt = await handle_reco(context)
-
         header = f"✅ Guardado: {result_ball(result)} ({result})"
         parts = [header]
         if outcome_txt:
@@ -659,8 +642,7 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "menu_stats":
         seq = get_last_results(800)
         sess = get_session()
-        txt = stats_text(seq, sess)
-        await safe_edit(q, txt, reply_markup=home_menu(sess))
+        await safe_edit(q, stats_text(seq, sess), reply_markup=home_menu(sess))
         return
 
     if data == "menu_session_start":
@@ -717,24 +699,20 @@ async def bank_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=home_menu(sess),
     )
 
-# ====== WEB (para Render ping) ======
+# ====== WEB (Render ping) ======
 flask_app = Flask(__name__)
 
 @flask_app.get("/")
 def home():
     return "OK - Bacbo bot activo ✅", 200
 
-# ====== Telegram runner ======
+# ====== Telegram runner (MAIN THREAD) ======
 async def start_bot():
     init_db()
 
     token = os.getenv("BOT_TOKEN")
-    channel_id = os.getenv("CHANNEL_ID")
-
     if not token:
         raise RuntimeError("Falta BOT_TOKEN en Render (Environment Variables).")
-    if not channel_id:
-        logging.warning("CHANNEL_ID no está definido. El bot funcionará sin publicar al canal.")
 
     request = HTTPXRequest(
         connect_timeout=20.0,
@@ -755,14 +733,15 @@ async def start_bot():
 def main():
     port = int(os.getenv("PORT", "10000"))
 
-    # Telegram en otro hilo, Flask en el principal
+    # Flask en thread, Telegram en el hilo principal (evita set_wakeup_fd error)
     from threading import Thread
 
-    def run_telegram():
-        asyncio.run(start_bot())
+    def run_web():
+        flask_app.run(host="0.0.0.0", port=port)
 
-    Thread(target=run_telegram, daemon=True).start()
-    flask_app.run(host="0.0.0.0", port=port)
+    Thread(target=run_web, daemon=True).start()
+
+    asyncio.run(start_bot())
 
 if __name__ == "__main__":
     main()
