@@ -1,9 +1,12 @@
+import os
 import sqlite3
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
-import os
+
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest, TimedOut, NetworkError
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -16,28 +19,20 @@ logging.basicConfig(level=logging.INFO)
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     err = context.error
-    # Timeouts/red: no son bugs, solo internet/telegram lento
     if isinstance(err, (TimedOut, NetworkError)):
         logging.warning("Telegram timeout/network error (se ignora): %s", err)
         return
     logging.exception("Exception while handling an update:", exc_info=err)
 
 # ====== Configuración ======
-WINDOW_N = 30               # ventana para lectura
-MAX_GALE = 1                # máximo 1 gale
-STOP_LOSS_PCT = 10          # -10% cierra sesión
-TAKE_PROFIT_PCT = 5         # +5% cierra sesión
-
-# % de banca que quieres arriesgar por señal (se redondea a ficha Evolution)
+WINDOW_N = 30
+MAX_GALE = 1
+STOP_LOSS_PCT = 10
+TAKE_PROFIT_PCT = 5
 BASE_BET_PCT = 2.0
-
-# Evolution chips (según tu imagen)
 ALLOWED_BETS = [5000, 10000, 25000, 125000, 500000, 2500000]
-
-TIE_AVOID_THRESHOLD = 3     # si hay >=3 ties en ventana, no apostar
-
-# Anti-tilt
-DANGER_COOLDOWN_ROUNDS = 3  # cuando la mesa es peligrosa, bloquea X rondas
+TIE_AVOID_THRESHOLD = 3
+DANGER_COOLDOWN_ROUNDS = 3
 
 # ====== DB ======
 def init_db():
@@ -66,7 +61,6 @@ def init_db():
     cur.execute("INSERT OR IGNORE INTO session (id) VALUES (1)")
     con.commit()
 
-    # --- Migración suave: agregar columnas si no existen ---
     cur.execute("PRAGMA table_info(session)")
     cols = {row[1] for row in cur.fetchall()}
 
@@ -153,10 +147,6 @@ def set_session(**kwargs):
 
 # ====== Chips / Redondeo Evolution ======
 def round_to_allowed(amount: float) -> float:
-    """
-    Redondea HACIA ARRIBA al siguiente chip permitido.
-    Ej: 6400 -> 10000
-    """
     for v in ALLOWED_BETS:
         if amount <= v:
             return float(v)
@@ -190,17 +180,8 @@ def stop_session():
     )
 
 def calc_next_bet(sess: SessionState) -> float:
-    """
-    Gale por escalón (Evolution):
-    - gale 0: base_bet
-    - gale 1: siguiente chip
-    """
-    base = float(sess.base_bet)
-    # por si acaso, si base no está exacta en lista, la ajustamos
-    base = round_to_allowed(base)
-
-    if base not in ALLOWED_BETS:
-        # seguridad extra
+    base = round_to_allowed(float(sess.base_bet))
+    if int(base) not in ALLOWED_BETS:
         base = float(ALLOWED_BETS[0])
 
     idx = ALLOWED_BETS.index(int(base))
@@ -229,9 +210,6 @@ def check_stop_take(sess: SessionState) -> Optional[str]:
     return None
 
 def settle_pending_bet(sess: SessionState, actual_result: str) -> Tuple[SessionState, str]:
-    """
-    Resuelve la apuesta pendiente con el resultado real que el usuario registra.
-    """
     if not (sess.is_active and sess.awaiting_outcome and sess.pending_side in ("P", "B") and sess.pending_bet > 0):
         return sess, ""
 
@@ -242,7 +220,6 @@ def settle_pending_bet(sess: SessionState, actual_result: str) -> Tuple[SessionS
 
     if actual_result == "T":
         outcome_txt = "🟡 Resultado fue TIE. Push (banca no cambia)."
-        # banca y gale igual
     elif actual_result == side:
         bank += bet
         gale = 0
@@ -292,15 +269,7 @@ def current_streak(seq: List[str]) -> Tuple[Optional[str], int]:
 def count_ties(seq: List[str]) -> int:
     return sum(1 for x in seq if x == "T")
 
-# ====== Detector mesa peligrosa (ANTI-TILT) ======
 def is_danger_table(seq: List[str]) -> Tuple[bool, str]:
-    """
-    Detecta caos estadístico en la ventana:
-    - ties altos
-    - chop muy alto + rachas cortas
-    - chop "ruidoso" (cerca a 0.5) + sin racha clara
-    Devuelve (danger, motivo)
-    """
     if len(seq) < 12:
         return False, ""
 
@@ -309,41 +278,28 @@ def is_danger_table(seq: List[str]) -> Tuple[bool, str]:
     cr = chop_rate(win)
     streak_side, streak_len = current_streak(win)
 
-    # 1) Muchos ties
     if ties >= 4:
         return True, f"Muchos TIE en ventana ({ties}/{len(win)})."
-
-    # 2) Chop extremo + sin racha
     if cr >= 0.75 and streak_len <= 2:
         return True, f"Chop extremo (ChopRate {cr:.2f}) y sin racha clara."
-
-    # 3) Mesa ruidosa (0.45-0.55) y racha corta => “random”
     if 0.45 <= cr <= 0.55 and streak_len <= 2 and ties >= 2:
         return True, f"Mesa muy ruidosa (ChopRate {cr:.2f}) con TIE frecuentes."
-
     return False, ""
 
 def decide_action(seq: List[str], sess: SessionState) -> Tuple[str, str]:
-    """
-    Devuelve (accion, detalle)
-    accion: NO_BET / BET_P / BET_B
-    """
     if len(seq) < 10:
         return "NO_BET", "Aún hay pocas rondas (mínimo 10) para lectura."
 
-    # Anti-tilt cooldown activo
     if sess.danger_cooldown > 0:
         return "NO_BET", f"ANTI-TILT activo: espera {sess.danger_cooldown} ronda(s) para re-evaluar."
 
-    # Detector mesa peligrosa
     danger, why = is_danger_table(seq)
     if danger:
-        # bloquea X rondas y limpia apuesta pendiente
         set_session(danger_cooldown=DANGER_COOLDOWN_ROUNDS, pending_side=None, pending_bet=0, awaiting_outcome=0)
         return "NO_BET", f"🚨 Mesa peligrosa detectada: {why} (bloqueo {DANGER_COOLDOWN_ROUNDS} rondas)"
 
     last = seq[-1]
-    win = seq[-WINDOW_N:]
+    win = seq[-WINDOW_N:] if len(seq) >= WINDOW_N else seq[:]
     ties = count_ties(win)
     cr = chop_rate(win)
     streak_side, streak_len = current_streak(win)
@@ -488,7 +444,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-
     try:
         await q.answer()
     except (TimedOut, NetworkError):
@@ -502,19 +457,16 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("add_"):
-        result = data.split("_", 1)[1]  # P/B/T
+        result = data.split("_", 1)[1]
         add_round(result)
 
-        # bajar cooldown anti-tilt en cada ronda registrada
         sess_now = get_session()
         if sess_now.danger_cooldown > 0:
             set_session(danger_cooldown=max(0, sess_now.danger_cooldown - 1))
 
-        # resolver apuesta pendiente (si había)
         sess_before = get_session()
         sess_after, outcome_txt = settle_pending_bet(sess_before, result)
 
-        # stop loss / take profit
         stop_hit = check_stop_take(sess_after)
         if stop_hit == "STOP_LOSS":
             final_bank = sess_after.bank_current
@@ -529,7 +481,6 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_edit(q, txt, reply_markup=home_menu(get_session()))
             return
 
-        # recomendación próxima ronda
         seq = get_last_results(300)
         sess_now2 = get_session()
         reco_txt = format_reco_and_arm_next_bet(seq, sess_now2)
@@ -611,8 +562,15 @@ async def bank_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=home_menu(sess),
     )
 
+# ====== WEB (para que Render tenga qué pinguear) ======
+flask_app = Flask(__name__)
 
-def main():
+@flask_app.get("/")
+def home():
+    return "OK - Bacbo bot activo ✅", 200
+
+# ====== MAIN ======
+async def start_bot():
     init_db()
 
     TOKEN = os.getenv("BOT_TOKEN")
@@ -627,17 +585,31 @@ def main():
     )
 
     app = Application.builder().token(TOKEN).request(request).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("bank", bank_cmd))
     app.add_handler(CallbackQueryHandler(on_click))
     app.add_error_handler(error_handler)
 
-    print("✅ Bot iniciado correctamente...")
+    logging.info("✅ Bot de Telegram iniciado...")
 
-    # ✅ Esto mantiene vivo el proceso en Render sin pelearse con asyncio
-    app.run_polling(drop_pending_updates=True)
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(drop_pending_updates=True)
 
+    await asyncio.Event().wait()
+
+def main():
+    # Render asigna PORT para el webservice
+    port = int(os.getenv("PORT", "10000"))
+
+    # Corremos Flask en un hilo y el bot en el loop
+    from threading import Thread
+
+    def run_web():
+        flask_app.run(host="0.0.0.0", port=port)
+
+    Thread(target=run_web, daemon=True).start()
+    asyncio.run(start_bot())
 
 if __name__ == "__main__":
     main()
