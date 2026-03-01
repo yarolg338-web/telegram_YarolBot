@@ -616,7 +616,9 @@ async def bank_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def run():
     init_db()
 
+    import os
     TOKEN = os.getenv("BOT_TOKEN")
+
     if not TOKEN:
         raise RuntimeError("Falta BOT_TOKEN en Render")
 
@@ -636,7 +638,9 @@ async def run():
 
     print("✅ Bot iniciado correctamente...")
 
+    # 👇 ESTA línea mantiene vivo el proceso en Render
     await app.run_polling(drop_pending_updates=True)
-    
-    if __name__ == "__main__":
-        asyncio.run(run())
+
+
+if __name__ == "__main__":
+    asyncio.run(run())
