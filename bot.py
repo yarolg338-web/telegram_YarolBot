@@ -327,7 +327,11 @@ def decide_action(seq: List[str], sess: SessionState) -> Tuple[str, str]:
 
     return "NO_BET", "Sin confirmación clara. Mejor no entrar."
 
-def format_reco_and_arm_next_bet(seq: List[str], sess: SessionState) -> str:
+def format_reco_and_arm_next_bet(seq: List[str], sess: SessionState) -> Tuple[str, Optional[str]]:
+    """
+    Retorna: (texto, side_para_publicar_o_None)
+    side_para_publicar: "P" o "B" cuando hay APOSTAR, None cuando NO_BET
+    """
     action, detail = decide_action(seq, sess)
     win = seq[-WINDOW_N:] if len(seq) >= WINDOW_N else seq[:]
     cr = chop_rate(win)
@@ -341,12 +345,13 @@ def format_reco_and_arm_next_bet(seq: List[str], sess: SessionState) -> str:
     if action == "NO_BET":
         if sess.is_active:
             set_session(pending_side=None, pending_bet=0, awaiting_outcome=0)
-        return (
+        text = (
             f"🚫 NO APOSTAR\n"
             f"🧠 {detail}\n"
             f"📌 Ventana: {len(win)} | ChopRate: {cr:.2f} | Racha: {streak_side or '-'} x{streak_len} | Ties: {ties}/{len(win)}"
             f"{bank_line}"
         )
+        return text, None
 
     side = "P" if action == "BET_P" else "B"
     side_emoji = "🔵 PLAYER" if side == "P" else "🔴 BANKER"
@@ -358,7 +363,7 @@ def format_reco_and_arm_next_bet(seq: List[str], sess: SessionState) -> str:
     else:
         bet_line = "\nℹ️ Inicia sesión con /bank <monto> para controlar banca."
 
-    return (
+    text = (
         f"✅ APOSTAR\n"
         f"➡️ Recomendación próxima ronda: {side_emoji}\n"
         f"🧠 {detail}\n"
@@ -366,6 +371,7 @@ def format_reco_and_arm_next_bet(seq: List[str], sess: SessionState) -> str:
         f"{bet_line}"
         f"{bank_line}"
     )
+    return text, side
 
 # ====== SAFE EDIT ======
 async def safe_edit(q, text: str, reply_markup=None):
@@ -377,6 +383,50 @@ async def safe_edit(q, text: str, reply_markup=None):
         raise
     except (TimedOut, NetworkError):
         return
+
+# ====== MENSAJES CANAL (ANA PRIME STYLE) ======
+async def send_signal(context: ContextTypes.DEFAULT_TYPE, side: str) -> None:
+    """
+    Publica señal en el canal si CHANNEL_ID existe.
+    side: "P" o "B"
+    """
+    channel_id = context.application.bot_data.get("CHANNEL_ID")
+    if not channel_id:
+        return  # No configurado: no rompe el bot
+
+    lado = "🔵 PLAYER" if side == "P" else "🔴 BANKER"
+    ingresar = "🔴" if side == "P" else "🔵"
+
+    text = f"""
+✅ <b>ENTRADA CONFIRMADA</b> ✅
+
+🎰 <b>Juego:</b> Bac Bo - Evolution
+
+🕒 INGRESAR DESPUÉS: {ingresar}
+🔥 APUESTA EN: {lado}
+
+🔒 PROTEGER EMPATE 10% (Opcional)
+🔁 MÁXIMO 1 GALE
+
+📊 Análisis IA activo
+""".strip()
+
+    play_url = context.application.bot_data.get("PLAY_URL")
+    reply_markup = None
+    if play_url:
+        reply_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎰 JUGAR AHORA", url=play_url)]
+        ])
+
+    try:
+        await context.bot.send_message(
+            chat_id=channel_id,
+            text=text,
+            parse_mode="HTML",
+            reply_markup=reply_markup
+        )
+    except Exception as e:
+        logging.warning("No se pudo publicar en canal: %s", e)
 
 # ====== UI ======
 def home_menu(sess: SessionState):
@@ -483,7 +533,11 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         seq = get_last_results(300)
         sess_now2 = get_session()
-        reco_txt = format_reco_and_arm_next_bet(seq, sess_now2)
+        reco_txt, side_to_post = format_reco_and_arm_next_bet(seq, sess_now2)
+
+        # Publicar en canal solo si hay señal
+        if side_to_post in ("P", "B"):
+            await send_signal(context, side_to_post)
 
         header = f"✅ Guardado: {result}"
         parts = [header]
@@ -497,7 +551,13 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "menu_reco":
         seq = get_last_results(300)
         sess = get_session()
-        txt = format_reco_and_arm_next_bet(seq, sess)
+        txt, side_to_post = format_reco_and_arm_next_bet(seq, sess)
+
+        # Si quieres que también publique señal cuando presionas "Recomendación ahora",
+        # descomenta estas 2 líneas:
+        # if side_to_post in ("P", "B"):
+        #     await send_signal(context, side_to_post)
+
         await safe_edit(q, txt, reply_markup=home_menu(get_session()))
         return
 
@@ -569,13 +629,32 @@ flask_app = Flask(__name__)
 def home():
     return "OK - Bacbo bot activo ✅", 200
 
+@flask_app.get("/health")
+def health():
+    return {"ok": True}, 200
+
 # ====== MAIN ======
 async def start_bot():
     init_db()
 
-    TOKEN = os.getenv("BOT_TOKEN")
-    if not TOKEN:
+    token = os.getenv("BOT_TOKEN")
+    channel_id = os.getenv("CHANNEL_ID")  # string
+    play_url = os.getenv("PLAY_URL")      # optional
+
+    if not token:
         raise RuntimeError("Falta BOT_TOKEN en Render (Environment Variables).")
+
+    # Guardamos configuración en bot_data (visible en handlers)
+    # channel_id debe ser int si existe
+    app_bot_data = {}
+    if channel_id:
+        try:
+            app_bot_data["CHANNEL_ID"] = int(channel_id)
+        except ValueError:
+            logging.warning("CHANNEL_ID inválido (debe ser número -100...): %s", channel_id)
+
+    if play_url:
+        app_bot_data["PLAY_URL"] = play_url
 
     request = HTTPXRequest(
         connect_timeout=20.0,
@@ -584,7 +663,9 @@ async def start_bot():
         pool_timeout=20.0,
     )
 
-    app = Application.builder().token(TOKEN).request(request).build()
+    app = Application.builder().token(token).request(request).build()
+    app.bot_data.update(app_bot_data)
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("bank", bank_cmd))
     app.add_handler(CallbackQueryHandler(on_click))
@@ -594,15 +675,16 @@ async def start_bot():
 
     await app.initialize()
     await app.start()
+
+    # IMPORTANTE: polling (sin webhook). Evita conflicto 409.
+    # drop_pending_updates=True: limpia mensajes viejos
     await app.updater.start_polling(drop_pending_updates=True)
 
     await asyncio.Event().wait()
 
 def main():
-    # Render asigna PORT para el webservice
     port = int(os.getenv("PORT", "10000"))
 
-    # Corremos Flask en un hilo y el bot en el loop
     from threading import Thread
 
     def run_web():
