@@ -1,5 +1,4 @@
 import sqlite3
-import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -613,14 +612,12 @@ async def bank_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def run():
+def main():
     init_db()
 
-    import os
     TOKEN = os.getenv("BOT_TOKEN")
-
     if not TOKEN:
-        raise RuntimeError("Falta BOT_TOKEN en Render")
+        raise RuntimeError("Falta BOT_TOKEN en Render (Environment Variables).")
 
     request = HTTPXRequest(
         connect_timeout=20.0,
@@ -638,9 +635,9 @@ async def run():
 
     print("✅ Bot iniciado correctamente...")
 
-    # 👇 ESTA línea mantiene vivo el proceso en Render
-    await app.run_polling(drop_pending_updates=True)
+    # ✅ Esto mantiene vivo el proceso en Render sin pelearse con asyncio
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    main()
