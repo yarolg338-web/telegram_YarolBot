@@ -1,4 +1,4 @@
-import sqlite3
+ import sqlite3
 import asyncio
 import logging
 from dataclasses import dataclass
@@ -637,6 +637,12 @@ async def run():
     print("✅ Bot iniciado correctamente...")
 
     await app.run_polling(drop_pending_updates=True)
+    
+    if __name__ == "__main__":
+    import asyncio
 
-if __name__ == "__main__":
-    asyncio.run(run())
+    loop = asyncio.get_event_loop()
+    loop.create_task(run())
+    loop.run_forever()
+
+
