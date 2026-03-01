@@ -620,7 +620,7 @@ async def run():
     import os
     TOKEN = os.getenv("BOT_TOKEN")
     if not TOKEN:
-        raise RuntimeError("Falta la variable de entorno BOT_TOKEN en Render")
+        raise RuntimeError("Falta BOT_TOKEN en Render")
 
     request = HTTPXRequest(
         connect_timeout=20.0,
@@ -638,7 +638,6 @@ async def run():
 
     print("✅ Bot iniciado correctamente...")
 
-    # PTB v20+: usa run_polling (no app.updater.*)
     await app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
