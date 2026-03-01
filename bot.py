@@ -639,10 +639,4 @@ async def run():
     await app.run_polling(drop_pending_updates=True)
     
     if __name__ == "__main__":
-    import asyncio
-
-    loop = asyncio.get_event_loop()
-    loop.create_task(run())
-    loop.run_forever()
-
-
+    asyncio.run(run())
