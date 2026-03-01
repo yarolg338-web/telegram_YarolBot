@@ -617,6 +617,7 @@ import os  # <-- agrega este import arriba del archivo (o dentro de run)
 async def run():
     init_db()
 
+    import os
     TOKEN = os.getenv("BOT_TOKEN")
     if not TOKEN:
         raise RuntimeError("Falta la variable de entorno BOT_TOKEN en Render")
@@ -637,17 +638,8 @@ async def run():
 
     print("✅ Bot iniciado correctamente...")
 
-    await app.initialize()
-    await app.start()
-    await app.bot.delete_webhook(drop_pending_updates=True)
-    await app.updater.start_polling()
-
-    try:
-        await asyncio.Event().wait()
-    finally:
-        await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
+    # PTB v20+: usa run_polling (no app.updater.*)
+    await app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     asyncio.run(run())
