@@ -2,21 +2,13 @@ import os
 import sqlite3
 import logging
 import time
+import threading
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
-from flask import Flask, request
-
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "BOT ONLINE", 200
-
-@app.route("/health")
-def health():
-    return "OK", 200
+from flask import Flask, request  # ✅ IMPORTANTE: request
 
 from telegram import (
     Update,
@@ -100,7 +92,7 @@ def init_db():
     )
     """)
 
-    # sesión por usuario (1 usuario típico, pero dejamos listo)
+    # sesión por usuario
     cur.execute("""
     CREATE TABLE IF NOT EXISTS session (
         user_id INTEGER PRIMARY KEY,
@@ -168,9 +160,6 @@ def get_session(user_id: int) -> SessionState:
         row = cur.fetchone()
     con.close()
 
-    # row order follows schema:
-    # user_id,is_active,bank_start,bank_current,base_bet,gale_level,pending_side,pending_bet,awaiting_outcome,
-    # danger_cooldown,awaiting_bank,dashboard_chat_id,dashboard_msg_id,possible_msg_id,confirmed_msg_id,last_activity_ts
     return SessionState(
         user_id=row[0],
         is_active=bool(row[1]),
@@ -240,7 +229,6 @@ def clear_rounds(user_id: int):
 # UTILS (emoji + chips)
 # ======================
 def side_to_ball(side: str) -> str:
-    # P = PLAYER (🔵), B = BANKER (🔴), T = TIE (🟠)
     if side == "P":
         return "🔵"
     if side == "B":
@@ -303,7 +291,6 @@ def calc_next_bet(sess: SessionState) -> float:
     if sess.gale_level == 0:
         return float(ALLOWED_BETS[idx])
 
-    # 1 escalón arriba por cada gale (hasta MAX_GALE)
     next_idx = min(idx + 1, len(ALLOWED_BETS) - 1)
     return float(ALLOWED_BETS[next_idx])
 
@@ -326,7 +313,7 @@ def check_stop_take(sess: SessionState) -> Optional[str]:
 
 
 # ======================
-# METRICS / STRATEGY (tu lógica)
+# METRICS / STRATEGY
 # ======================
 def chop_rate(seq: List[str]) -> float:
     filtered = [x for x in seq if x in ("P", "B")]
@@ -418,18 +405,16 @@ def decide_action(seq: List[str], sess: SessionState) -> Tuple[str, str]:
 
 
 # ======================
-# ROADMAP 6xN (bead road simple)
+# ROADMAP 6xN
 # ======================
 def render_roadmap_6xn(seq: List[str]) -> str:
     if not seq:
         return ""
 
-    # max items to render = rows * cols
     max_items = ROADMAP_ROWS * ROADMAP_MAX_COLS_TO_RENDER
     trimmed = seq[-max_items:]
     truncated = len(seq) > len(trimmed)
 
-    # fill rows top->bottom then next column
     cols = (len(trimmed) + ROADMAP_ROWS - 1) // ROADMAP_ROWS
     grid = [["  " for _ in range(cols)] for _ in range(ROADMAP_ROWS)]
 
@@ -550,7 +535,6 @@ async def ensure_dashboard(update: Optional[Update], context: ContextTypes.DEFAU
     if not chat_id:
         return
 
-    # si existe dashboard, editamos; si no, lo creamos
     if sess.dashboard_chat_id == chat_id and sess.dashboard_msg_id:
         try:
             await context.bot.edit_message_text(
@@ -563,7 +547,6 @@ async def ensure_dashboard(update: Optional[Update], context: ContextTypes.DEFAU
             )
             return
         except BadRequest:
-            # si no se puede editar (muy viejo/borrado), lo recreamos
             pass
 
     msg = await context.bot.send_message(
@@ -577,7 +560,7 @@ async def ensure_dashboard(update: Optional[Update], context: ContextTypes.DEFAU
 
 
 # ======================
-# CHANNEL MESSAGES (AnaPrime style)
+# CHANNEL MESSAGES
 # ======================
 def text_posible_entrada() -> str:
     return (
@@ -587,9 +570,8 @@ def text_posible_entrada() -> str:
 
 
 def text_entrada_confirmada(bet_side: str) -> str:
-    # bet_side: P o B
-    ingresar = side_to_ball(opposite_side(bet_side))  # bola previa
-    apuesta = side_to_ball(bet_side)                  # bola a apostar
+    ingresar = side_to_ball(opposite_side(bet_side))
+    apuesta = side_to_ball(bet_side)
     return (
         "✅ <b>ENTRADA CONFIRMADA</b> ✅\n\n"
         "🎰 <b>Juego:</b> Bac Bo - Evolution\n"
@@ -642,7 +624,6 @@ async def channel_delete(context: ContextTypes.DEFAULT_TYPE, msg_id: Optional[in
 # BET SETTLEMENT
 # ======================
 def settle_pending(sess: SessionState, actual_result: str) -> Tuple[SessionState, str]:
-    # devuelve sesión actualizada + outcome type: WIN/LOSE/TIE/NONE
     if not (sess.is_active and sess.awaiting_outcome and sess.pending_side in ("P", "B") and sess.pending_bet > 0):
         return sess, "NONE"
 
@@ -653,7 +634,6 @@ def settle_pending(sess: SessionState, actual_result: str) -> Tuple[SessionState
 
     if actual_result == "T":
         outcome = "TIE"
-        # push: banca no cambia
     elif actual_result == side:
         outcome = "WIN"
         bank += bet
@@ -693,7 +673,6 @@ def is_inactive(sess: SessionState) -> bool:
 def reset_for_inactivity(user_id: int):
     clear_rounds(user_id)
     stop_session(user_id)
-    # dashboard queda “vacío” automáticamente al re-render
 
 
 # ======================
@@ -711,7 +690,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     touch_activity(user_id)
 
-    # Intentar borrar el /start del usuario (best-effort)
     try:
         await update.message.delete()
     except Exception:
@@ -725,7 +703,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Captura monto cuando está awaiting_bank."""
     user_id = update.effective_user.id
     touch_activity(user_id)
 
@@ -736,9 +713,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (update.message.text or "").strip()
 
-    # si está esperando banca
     if sess.awaiting_bank:
-        # permitir que escriba "33500" o "/bank 33500"
         if text.lower().startswith("/bank"):
             parts = text.split()
             if len(parts) >= 2:
@@ -755,26 +730,21 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Monto inválido. Ej: 33500")
             return
 
-        # iniciar sesión
         start_session(user_id, bank)
 
-        # borrar mensaje del usuario (best-effort)
         try:
             await update.message.delete()
         except Exception:
             pass
 
-        # re-render dashboard
         await ensure_dashboard(update, context, user_id)
         return
 
-    # si no está esperando banca, intentar borrar texto para mantener chat limpio
     try:
         await update.message.delete()
     except Exception:
         pass
 
-    # refrescar dashboard por si acaso
     await ensure_dashboard(update, context, user_id)
 
 
@@ -796,7 +766,6 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = q.data
 
     if data == "dash_add":
-        # mostramos teclado de resultado (editando dashboard)
         seq = get_last_results(user_id, 300)
         text = build_dashboard_text(seq, sess)
         try:
@@ -812,7 +781,6 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "dash_bank":
         set_session(user_id, awaiting_bank=1)
-        # pedimos monto pero sin ensuciar: lo ponemos en el mismo dashboard
         seq = get_last_results(user_id, 300)
         text = build_dashboard_text(seq, sess)
         try:
@@ -829,7 +797,6 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "dash_reset":
         clear_rounds(user_id)
         stop_session(user_id)
-        # también borrar mensajes “posible” del canal si existían
         sess = get_session(user_id)
         await channel_delete(context, sess.possible_msg_id)
         set_session(user_id, possible_msg_id=None, confirmed_msg_id=None)
@@ -841,21 +808,17 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ensure_dashboard(update, context, user_id)
         return
 
-    # ============ RESULT ADD ============
     if data.startswith("add_"):
-        result = data.split("_", 1)[1]  # P/B/T
+        result = data.split("_", 1)[1]
         add_round(user_id, result)
 
-        # danger cooldown decrement
         sess_now = get_session(user_id)
         if sess_now.danger_cooldown > 0:
             set_session(user_id, danger_cooldown=max(0, sess_now.danger_cooldown - 1))
 
-        # 1) resolver apuesta pendiente (si existía)
         sess_before = get_session(user_id)
         sess_after, outcome = settle_pending(sess_before, result)
 
-        # si hubo outcome y existía confirmed_msg_id, responder al confirmado
         if outcome in ("WIN", "LOSE", "TIE") and sess_before.confirmed_msg_id:
             if outcome == "WIN":
                 await channel_send(context, text_green(result_side=result), reply_to=sess_before.confirmed_msg_id)
@@ -864,107 +827,95 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await channel_send(context, text_tie(), reply_to=sess_before.confirmed_msg_id)
 
-        # stop/take
         stop_hit = check_stop_take(sess_after)
         if stop_hit in ("STOP_LOSS", "TAKE_PROFIT"):
-            # cerramos sesión pero dejamos historial (tú decides)
             stop_session(user_id)
 
-        # 2) recomputar decisión para señales al canal (posible/confirmada)
         seq = get_last_results(user_id, 300)
         sess = get_session(user_id)
         action, _detail = decide_action(seq, sess)
 
-        # reglas “AnaPrime-like”:
-        # - si action es BET_* -> posible entrada (si no existe)
-        # - si ya había posible y ahora NO_BET -> borrar posible
-        # - confirmada: cuando ya había posible y vuelve a salir BET_* (o mismo) después de nuevo resultado
-        #   (aquí lo confirmamos inmediatamente cuando action es BET_* y estamos activos)
-        #
-        # Ajuste práctico para tu flujo manual:
-        # - "POSIBLE" se manda apenas detectamos BET_* (y no hay posible)
-        # - "CONFIRMADA" se manda si:
-        #      a) ya existía posible_msg_id, y
-        #      b) action sigue siendo BET_*
-        #   -> ahí borramos la posible y dejamos confirmada.
-        #
         if action.startswith("BET_"):
             bet_side = "P" if action == "BET_P" else "B"
 
             if sess.possible_msg_id is None:
-                # crear posible entrada
                 possible_id = await channel_send(context, text_posible_entrada())
                 set_session(user_id, possible_msg_id=possible_id)
-
             else:
-                # confirmar entrada y borrar posible
                 await channel_delete(context, sess.possible_msg_id)
                 confirmed_id = await channel_send(context, text_entrada_confirmada(bet_side))
                 set_session(user_id, possible_msg_id=None, confirmed_msg_id=confirmed_id)
 
-                # armar apuesta pendiente si la sesión está activa
                 sess2 = get_session(user_id)
                 if sess2.is_active:
                     bet = calc_next_bet(sess2)
                     set_session(user_id, pending_side=bet_side, pending_bet=bet, awaiting_outcome=1)
-
         else:
-            # NO_BET: borrar posible si estaba
             if sess.possible_msg_id is not None:
                 await channel_delete(context, sess.possible_msg_id)
                 set_session(user_id, possible_msg_id=None)
 
-        # 3) refrescar dashboard (siempre)
         await ensure_dashboard(update, context, user_id)
         return
 
 
 # ======================
-# WEBHOOK + FLASK
+# WEBHOOK + FLASK (✅ UN SOLO FLASK)
 # ======================
 flask_app = Flask(__name__)
 tg_app: Optional[Application] = None
+tg_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
 @flask_app.get("/")
+def root_home():
+    return "BOT ONLINE", 200
+
+
+@flask_app.get("/health")
 def health():
-    return "OK - Bacbo bot activo ✅", 200
+    return "OK", 200
 
 
 @flask_app.post(WEBHOOK_PATH)
 def webhook():
-    global tg_app
-    if tg_app is None:
+    global tg_app, tg_loop
+    if tg_app is None or tg_loop is None:
         return "Bot not ready", 503
 
     data = request.get_json(force=True, silent=True) or {}
     update = Update.de_json(data, tg_app.bot)
-    tg_app.update_queue.put_nowait(update)
+
+    # ✅ thread-safe: Flask thread -> Telegram asyncio loop
+    fut = asyncio.run_coroutine_threadsafe(tg_app.update_queue.put(update), tg_loop)
+    try:
+        fut.result(timeout=2)
+    except Exception:
+        return "Queue error", 500
+
     return "OK", 200
 
 
 async def setup_webhook(application: Application):
-    # Limpia webhook viejo y setea el nuevo
     await application.bot.delete_webhook(drop_pending_updates=True)
     ok = await application.bot.set_webhook(url=WEBHOOK_URL, drop_pending_updates=True)
     log.info("Webhook set: %s", ok)
 
 
-def main():
-    init_db()
+def start_telegram_in_thread():
+    """✅ Mantiene vivo el loop de Telegram para que el bot no muera."""
+    global tg_app, tg_loop
 
-    global tg_app
+    tg_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(tg_loop)
+
     tg_app = Application.builder().token(BOT_TOKEN).build()
 
     tg_app.add_error_handler(error_handler)
     tg_app.add_handler(CommandHandler("start", cmd_start))
     tg_app.add_handler(CallbackQueryHandler(on_click))
     tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-    # (si llega /bank suelto como comando, lo capturamos igual por texto si no existe handler)
     tg_app.add_handler(MessageHandler(filters.COMMAND, on_text))
-
-    # Inicializar bot + webhook
-    import asyncio
 
     async def runner():
         await tg_app.initialize()
@@ -972,9 +923,18 @@ def main():
         await tg_app.start()
         log.info("✅ Bot iniciado (WEBHOOK).")
 
-    asyncio.run(runner())
+    tg_loop.create_task(runner())
+    tg_loop.run_forever()
 
-    # Flask server (Render)
+
+def main():
+    init_db()
+
+    # ✅ Arrancar Telegram en hilo separado (loop vivo)
+    t = threading.Thread(target=start_telegram_in_thread, daemon=True)
+    t.start()
+
+    # ✅ Flask server (Render)
     port = int(os.getenv("PORT", "10000"))
     flask_app.run(host="0.0.0.0", port=port)
 
