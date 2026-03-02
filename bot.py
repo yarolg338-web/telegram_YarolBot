@@ -8,6 +8,16 @@ from typing import List, Optional, Tuple
 
 from flask import Flask, request
 
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "BOT ONLINE", 200
+
+@app.route("/health")
+def health():
+    return "OK", 200
+
 from telegram import (
     Update,
     InlineKeyboardButton,
