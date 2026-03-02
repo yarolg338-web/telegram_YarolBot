@@ -609,6 +609,7 @@ async def safe_delete_message(bot, chat_id: int, msg_id: int):
         return
 
 
+# ✅✅✅ MODIFICADO: DASHBOARD ÚNICO (evita duplicados si borras el mensaje)
 async def ensure_dashboard(update: Optional[Update], context: ContextTypes.DEFAULT_TYPE, user_id: int):
     sess = get_session(user_id)
     seq = get_last_results(user_id, 300)
@@ -623,6 +624,7 @@ async def ensure_dashboard(update: Optional[Update], context: ContextTypes.DEFAU
     if not chat_id:
         return
 
+    # 1) Intentar editar el dashboard actual
     if sess.dashboard_chat_id == chat_id and sess.dashboard_msg_id:
         try:
             await context.bot.edit_message_text(
@@ -635,8 +637,12 @@ async def ensure_dashboard(update: Optional[Update], context: ContextTypes.DEFAU
             )
             return
         except BadRequest:
-            pass
+            # Si no se puede editar (porque lo borraste o no existe),
+            # eliminamos el ID guardado para evitar duplicados
+            await safe_delete_message(context.bot, chat_id, sess.dashboard_msg_id)
+            set_session(user_id, dashboard_msg_id=None)
 
+    # 2) Crear UNO nuevo y guardar su ID
     msg = await context.bot.send_message(
         chat_id=chat_id,
         text=text,
@@ -954,13 +960,11 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if outcome == "LOSE":
             sess_now = get_session(user_id)
             if sess_now.is_active and sess_now.gale_level > 0 and sess_now.gale_level <= MAX_GALE:
-                # Misma apuesta que se perdió (GALE = repetir el lado)
                 gale_side = sess_before.pending_side  # 'P' o 'B'
                 if gale_side in ("P", "B") and sess_before.confirmed_msg_id:
                     gale_text = text_entrada_confirmada(gale_side, last_result=result) + f"\n\n🔁 <b>GALE {sess_now.gale_level}/{MAX_GALE}</b>"
                     gale_confirmed_id = await channel_send(context, gale_text, reply_to=sess_before.confirmed_msg_id)
 
-                    # preparar apuesta pendiente GALE (monto siguiente)
                     bet_amount = calc_next_bet(sess_now)
                     set_session(
                         user_id,
@@ -968,7 +972,6 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         pending_side=gale_side,
                         pending_bet=bet_amount,
                         awaiting_outcome=1,
-                        # limpiar candidato/posible para evitar duplicados
                         possible_msg_id=None,
                         last_candidate_side=None,
                         candidate_score=0,
@@ -978,7 +981,6 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await ensure_dashboard(update, context, user_id)
                     return
 
-            # Si perdió y YA NO hay más GALE (gale_level reseteó a 0), cerramos ciclo también
             if sess_after.gale_level == 0:
                 set_session(
                     user_id,
@@ -1006,29 +1008,24 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state, side, score, detail = decide_with_score(seq, sess)
         now_ts = int(time.time())
 
-        # Regla clave AnaPrime: CONFIRMADA solo después de existir POSIBLE antes
         if state == "CONFIRMED" and sess.possible_msg_id is None:
             state = "POSSIBLE"
 
         if state == "NONE" or side is None:
-            # borrar posible si existía
             if sess.possible_msg_id is not None:
                 await channel_delete(context, sess.possible_msg_id)
             set_session(user_id, possible_msg_id=None, last_candidate_side=None, candidate_score=0, candidate_ts=0)
 
         elif state == "POSSIBLE":
-            # si ya hay posible, pero cambia el lado -> borrar y reiniciar
             if sess.possible_msg_id is not None and sess.last_candidate_side and side != sess.last_candidate_side:
                 await channel_delete(context, sess.possible_msg_id)
                 set_session(user_id, possible_msg_id=None)
 
-            # crear posible si no existe
             sess2 = get_session(user_id)
             if sess2.possible_msg_id is None:
                 possible_id = await channel_send(context, text_posible_entrada())
                 set_session(user_id, possible_msg_id=possible_id)
 
-            # guardar candidato
             set_session(user_id, last_candidate_side=side, candidate_score=score, candidate_ts=now_ts)
 
         else:  # CONFIRMED
@@ -1037,7 +1034,6 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 can_confirm = False
 
             if can_confirm and sess.possible_msg_id is not None and sess.candidate_score >= POSSIBLE_SCORE:
-                # borrar posible
                 await channel_delete(context, sess.possible_msg_id)
 
                 last_result = seq[-1] if seq else side
@@ -1051,13 +1047,11 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     candidate_ts=0
                 )
 
-                # armar pendiente (solo si sesión activa)
                 sess3 = get_session(user_id)
                 if sess3.is_active:
                     bet = calc_next_bet(sess3)
                     set_session(user_id, pending_side=side, pending_bet=bet, awaiting_outcome=1)
             else:
-                # si no puede confirmar, vuelve a posible
                 if sess.possible_msg_id is None:
                     possible_id = await channel_send(context, text_posible_entrada())
                     set_session(user_id, possible_msg_id=possible_id)
@@ -1129,7 +1123,7 @@ def start_telegram_in_thread():
         await tg_app.start()
         log.info("✅ Bot iniciado (WEBHOOK).")
 
-    tg_loop.create_task(runner())
+    tg_loop.create_task(runner)
     tg_loop.run_forever()
 
 
