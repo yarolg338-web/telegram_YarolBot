@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
-from flask import Flask, request  # ✅ IMPORTANTE
+from flask import Flask, request
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -30,11 +30,11 @@ log = logging.getLogger("bacbo")
 
 DB_PATH = "bacbo.db"
 
-# Lógica / estrategia
-WINDOW_N = 30
-MAX_GALE = 2
-TIE_AVOID_THRESHOLD = 3
-DANGER_COOLDOWN_ROUNDS = 3
+# Lógica / estrategia (conservador)
+WINDOW_SHORT = 12          # lectura rápida (más sensible)
+WINDOW_LONG = 30           # lectura estable
+MIN_PB_FOR_STATS = 10      # mínimo de P/B para confiar en chop/racha
+TIE_AVOID_THRESHOLD = 2    # más conservador
 
 STOP_LOSS_PCT = 10
 TAKE_PROFIT_PCT = 5
@@ -47,6 +47,11 @@ INACTIVITY_SECONDS = 30 * 60  # 30 minutos
 ROADMAP_ROWS = 6
 ROADMAP_MAX_COLS_TO_RENDER = 60  # evita reventar el mensaje
 
+# Señales por score (AnaPrime-like)
+POSSIBLE_SCORE = 60
+CONFIRMED_SCORE = 75
+CONFIRM_SAME_SIDE_REQUIRED = True  # confirmar solo si mantiene el lado (más conservador)
+
 # ======================
 # ENV
 # ======================
@@ -55,7 +60,6 @@ CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip()
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").strip().rstrip("/")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret").strip()
 
-# ✅ CORREGIDO: indentación
 if not BOT_TOKEN:
     raise RuntimeError("Falta BOT_TOKEN en Environment Variables (Render).")
 if not CHANNEL_ID:
@@ -66,56 +70,67 @@ if not PUBLIC_URL:
 WEBHOOK_PATH = f"/webhook/{WEBHOOK_SECRET}"
 WEBHOOK_URL = f"{PUBLIC_URL}{WEBHOOK_PATH}"
 
+
 # ======================
 # DB
 # ======================
 def db() -> sqlite3.Connection:
-    con = sqlite3.connect(DB_PATH, check_same_thread=False)
-    return con
-
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 def init_db():
     con = db()
     cur = con.cursor()
 
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS rounds (
-            user_id INTEGER NOT NULL,
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts TEXT NOT NULL,
-            result TEXT NOT NULL CHECK(result IN ('P','B','T'))
-        )
-        """
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS rounds (
+        user_id INTEGER NOT NULL,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT NOT NULL,
+        result TEXT NOT NULL CHECK(result IN ('P','B','T'))
     )
+    """)
 
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS session (
-            user_id INTEGER PRIMARY KEY,
-            is_active INTEGER NOT NULL DEFAULT 0,
-            bank_start REAL NOT NULL DEFAULT 0,
-            bank_current REAL NOT NULL DEFAULT 0,
-            base_bet REAL NOT NULL DEFAULT 0,
-            gale_level INTEGER NOT NULL DEFAULT 0,
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS session (
+        user_id INTEGER PRIMARY KEY,
+        is_active INTEGER NOT NULL DEFAULT 0,
+        bank_start REAL NOT NULL DEFAULT 0,
+        bank_current REAL NOT NULL DEFAULT 0,
+        base_bet REAL NOT NULL DEFAULT 0,
+        gale_level INTEGER NOT NULL DEFAULT 0,
 
-            pending_side TEXT DEFAULT NULL,
-            pending_bet REAL NOT NULL DEFAULT 0,
-            awaiting_outcome INTEGER NOT NULL DEFAULT 0,
-            danger_cooldown INTEGER NOT NULL DEFAULT 0,
+        pending_side TEXT DEFAULT NULL,
+        pending_bet REAL NOT NULL DEFAULT 0,
+        awaiting_outcome INTEGER NOT NULL DEFAULT 0,
+        danger_cooldown INTEGER NOT NULL DEFAULT 0,
 
-            awaiting_bank INTEGER NOT NULL DEFAULT 0,
+        awaiting_bank INTEGER NOT NULL DEFAULT 0,
 
-            dashboard_chat_id INTEGER DEFAULT NULL,
-            dashboard_msg_id INTEGER DEFAULT NULL,
+        dashboard_chat_id INTEGER DEFAULT NULL,
+        dashboard_msg_id INTEGER DEFAULT NULL,
 
-            possible_msg_id INTEGER DEFAULT NULL,
-            confirmed_msg_id INTEGER DEFAULT NULL,
+        possible_msg_id INTEGER DEFAULT NULL,
+        confirmed_msg_id INTEGER DEFAULT NULL,
 
-            last_activity_ts INTEGER NOT NULL DEFAULT 0
-        )
-        """
+        last_candidate_side TEXT DEFAULT NULL,
+        candidate_score INTEGER NOT NULL DEFAULT 0,
+        candidate_ts INTEGER NOT NULL DEFAULT 0,
+
+        last_activity_ts INTEGER NOT NULL DEFAULT 0
     )
+    """)
+
+    # --- MIGRACIÓN: agregar columnas si la tabla ya existía ---
+    cur.execute("PRAGMA table_info(session)")
+    cols = {r[1] for r in cur.fetchall()}
+
+    def add_col(name: str, ddl: str):
+        if name not in cols:
+            cur.execute(ddl)
+
+    add_col("last_candidate_side", "ALTER TABLE session ADD COLUMN last_candidate_side TEXT DEFAULT NULL")
+    add_col("candidate_score", "ALTER TABLE session ADD COLUMN candidate_score INTEGER NOT NULL DEFAULT 0")
+    add_col("candidate_ts", "ALTER TABLE session ADD COLUMN candidate_ts INTEGER NOT NULL DEFAULT 0")
 
     con.commit()
     con.close()
@@ -143,6 +158,10 @@ class SessionState:
     possible_msg_id: Optional[int]
     confirmed_msg_id: Optional[int]
 
+    last_candidate_side: Optional[str]
+    candidate_score: int
+    candidate_ts: int
+
     last_activity_ts: int
 
 
@@ -151,18 +170,33 @@ def get_session(user_id: int) -> SessionState:
     cur = con.cursor()
     cur.execute("SELECT * FROM session WHERE user_id=?", (user_id,))
     row = cur.fetchone()
-
     if not row:
-        cur.execute(
-            "INSERT INTO session (user_id, last_activity_ts) VALUES (?,?)",
-            (user_id, int(time.time())),
-        )
+        cur.execute("INSERT INTO session (user_id, last_activity_ts) VALUES (?,?)", (user_id, int(time.time())))
         con.commit()
         cur.execute("SELECT * FROM session WHERE user_id=?", (user_id,))
         row = cur.fetchone()
-
     con.close()
 
+    # indices:
+    # 0 user_id
+    # 1 is_active
+    # 2 bank_start
+    # 3 bank_current
+    # 4 base_bet
+    # 5 gale_level
+    # 6 pending_side
+    # 7 pending_bet
+    # 8 awaiting_outcome
+    # 9 danger_cooldown
+    # 10 awaiting_bank
+    # 11 dashboard_chat_id
+    # 12 dashboard_msg_id
+    # 13 possible_msg_id
+    # 14 confirmed_msg_id
+    # 15 last_candidate_side
+    # 16 candidate_score
+    # 17 candidate_ts
+    # 18 last_activity_ts
     return SessionState(
         user_id=row[0],
         is_active=bool(row[1]),
@@ -170,25 +204,32 @@ def get_session(user_id: int) -> SessionState:
         bank_current=float(row[3]),
         base_bet=float(row[4]),
         gale_level=int(row[5]),
+
         pending_side=row[6],
         pending_bet=float(row[7]),
         awaiting_outcome=bool(row[8]),
         danger_cooldown=int(row[9]),
+
         awaiting_bank=bool(row[10]),
+
         dashboard_chat_id=row[11],
         dashboard_msg_id=row[12],
+
         possible_msg_id=row[13],
         confirmed_msg_id=row[14],
-        last_activity_ts=int(row[15]),
+
+        last_candidate_side=row[15],
+        candidate_score=int(row[16]),
+        candidate_ts=int(row[17]),
+
+        last_activity_ts=int(row[18]),
     )
 
 
 def set_session(user_id: int, **kwargs):
     if not kwargs:
         return
-
-    keys = []
-    vals = []
+    keys, vals = [], []
     for k, v in kwargs.items():
         keys.append(f"{k}=?")
         vals.append(v)
@@ -215,10 +256,7 @@ def add_round(user_id: int, result: str):
 def get_last_results(user_id: int, n: int) -> List[str]:
     con = db()
     cur = con.cursor()
-    cur.execute(
-        "SELECT result FROM rounds WHERE user_id=? ORDER BY id DESC LIMIT ?",
-        (user_id, n),
-    )
+    cur.execute("SELECT result FROM rounds WHERE user_id=? ORDER BY id DESC LIMIT ?", (user_id, n))
     rows = [r[0] for r in cur.fetchall()]
     con.close()
     return list(reversed(rows))
@@ -236,6 +274,7 @@ def clear_rounds(user_id: int):
 # UTILS
 # ======================
 def side_to_ball(side: str) -> str:
+    # P=PLAYER 🔵, B=BANKER 🔴, T=TIE 🟠
     if side == "P":
         return "🔵"
     if side == "B":
@@ -253,7 +292,6 @@ def round_to_allowed(amount: float) -> float:
 def start_session(user_id: int, bank: float):
     raw = bank * (BASE_BET_PCT / 100.0)
     base = round_to_allowed(max(ALLOWED_BETS[0], raw))
-
     set_session(
         user_id,
         is_active=1,
@@ -268,6 +306,9 @@ def start_session(user_id: int, bank: float):
         awaiting_bank=0,
         possible_msg_id=None,
         confirmed_msg_id=None,
+        last_candidate_side=None,
+        candidate_score=0,
+        candidate_ts=0,
     )
 
 
@@ -283,6 +324,9 @@ def stop_session(user_id: int):
         awaiting_bank=0,
         possible_msg_id=None,
         confirmed_msg_id=None,
+        last_candidate_side=None,
+        candidate_score=0,
+        candidate_ts=0,
     )
 
 
@@ -317,11 +361,11 @@ def check_stop_take(sess: SessionState) -> Optional[str]:
 
 
 # ======================
-# METRICS / STRATEGY
+# STRATEGY
 # ======================
 def chop_rate(seq: List[str]) -> float:
     filtered = [x for x in seq if x in ("P", "B")]
-    if len(filtered) < 2:
+    if len(filtered) < 8:
         return 0.0
     changes = sum(1 for i in range(1, len(filtered)) if filtered[i] != filtered[i - 1])
     return changes / (len(filtered) - 1)
@@ -352,66 +396,115 @@ def is_danger_table(seq: List[str]) -> Tuple[bool, str]:
     if len(seq) < 12:
         return False, ""
 
-    win = seq[-WINDOW_N:] if len(seq) >= WINDOW_N else seq[:]
+    win = seq[-WINDOW_LONG:] if len(seq) >= WINDOW_LONG else seq[:]
     ties = count_ties(win)
+    tie_ratio = ties / len(win) if win else 0.0
     cr = chop_rate(win)
-    streak_side, streak_len = current_streak(win)
+    _, streak_len = current_streak(win)
 
+    if len(win) >= 20 and tie_ratio >= 0.20:
+        return True, f"TIE ratio alto ({tie_ratio:.0%})."
     if ties >= 4:
-        return True, f"Muchos TIE en ventana ({ties}/{len(win)})."
+        return True, f"Muchos TIE ({ties}/{len(win)})."
     if cr >= 0.75 and streak_len <= 2:
-        return True, f"Chop extremo (ChopRate {cr:.2f}) y sin racha clara."
+        return True, f"Chop extremo (ChopRate {cr:.2f}) sin racha."
     if 0.45 <= cr <= 0.55 and streak_len <= 2 and ties >= 2:
-        return True, f"Mesa muy ruidosa (ChopRate {cr:.2f}) con TIE frecuentes."
+        return True, f"Mesa ruidosa (ChopRate {cr:.2f}) con TIE frecuentes."
     return False, ""
 
 
-def decide_action(seq: List[str], sess: SessionState) -> Tuple[str, str]:
-    if len(seq) < 10:
-        return "NO_BET", "Aún hay pocas rondas (mínimo 10) para lectura."
+# ===== SCORE ENGINE =====
+def compute_signal_score(seq: List[str], sess: SessionState) -> Tuple[int, Optional[str], str]:
+    # score 0..100, side 'P'/'B'/None, detalle
+    if len(seq) < 12:
+        return 0, None, "Pocas rondas (min 12)."
+    if seq[-1] == "T":
+        return 0, None, "Último fue TIE."
 
-    if sess.danger_cooldown > 0:
-        return "NO_BET", f"ANTI-TILT activo: espera {sess.danger_cooldown} ronda(s) para re-evaluar."
+    win_s = seq[-WINDOW_SHORT:] if len(seq) >= WINDOW_SHORT else seq[:]
+    win_l = seq[-WINDOW_LONG:] if len(seq) >= WINDOW_LONG else seq[:]
+
+    pb_l = [x for x in win_l if x in ("P", "B")]
+    if len(pb_l) < MIN_PB_FOR_STATS:
+        return 0, None, "Pocos P/B para lectura sólida."
 
     danger, why = is_danger_table(seq)
     if danger:
-        set_session(
-            sess.user_id,
-            danger_cooldown=DANGER_COOLDOWN_ROUNDS,
-            pending_side=None,
-            pending_bet=0,
-            awaiting_outcome=0,
-        )
-        return "NO_BET", f"🚨 Mesa peligrosa: {why} (bloqueo {DANGER_COOLDOWN_ROUNDS} rondas)"
+        return 0, None, f"Mesa peligrosa: {why}"
 
-    last = seq[-1]
-    win = seq[-WINDOW_N:] if len(seq) >= WINDOW_N else seq[:]
-    ties = count_ties(win)
-    cr = chop_rate(win)
-    streak_side, streak_len = current_streak(win)
+    ties_s = count_ties(win_s)
+    ties_l = count_ties(win_l)
+    cr_s = chop_rate(win_s)
+    cr_l = chop_rate(win_l)
+    streak_side, streak_len = current_streak(win_s)
 
-    if ties >= TIE_AVOID_THRESHOLD:
-        return "NO_BET", f"Muchos TIE recientes ({ties}/{len(win)})."
-    if last == "T":
-        return "NO_BET", "Último fue TIE. Espera 1 ronda y reevalúa."
-    if 0.40 <= cr <= 0.60 and streak_len < 3:
-        return "NO_BET", f"Mesa indecisa (ChopRate {cr:.2f})."
+    score = 0
+    reasons = []
 
-    if streak_len >= 3 and streak_side in ("P", "B"):
-        return ("BET_P" if streak_side == "P" else "BET_B"), f"RACHA: {streak_side} x{streak_len}. Seguir racha."
+    # Castigos por empate/ruido
+    if ties_s >= 2:
+        score -= 25
+        reasons.append("ties corto")
+    if ties_l >= 4:
+        score -= 20
+        reasons.append("ties largo")
 
-    if cr >= 0.65:
-        if last == "P":
-            return "BET_B", f"CHOP (ChopRate {cr:.2f}). Ir CONTRARIO: B."
-        if last == "B":
-            return "BET_P", f"CHOP (ChopRate {cr:.2f}). Ir CONTRARIO: P."
+    # chop medio = zona random
+    if 0.40 <= cr_s <= 0.60 and 0.40 <= cr_l <= 0.60:
+        score -= 35
+        reasons.append("chop medio")
 
-    filtered = [x for x in seq if x in ("P", "B")]
-    if len(filtered) >= 2 and filtered[-1] == filtered[-2]:
-        side = filtered[-1]
-        return ("BET_P" if side == "P" else "BET_B"), f"Confirmación {side}{side}. Seguir {side}."
+    # contradicción corto vs largo
+    if (cr_s >= 0.70 and 0.40 <= cr_l <= 0.60) or (0.40 <= cr_s <= 0.60 and cr_l >= 0.70):
+        score -= 25
+        reasons.append("ventanas no concuerdan")
 
-    return "NO_BET", "Sin confirmación clara. Mejor no entrar."
+    side = None
+
+    # 1) Racha fuerte (más conservador)
+    if streak_side in ("P", "B") and streak_len >= 4 and cr_l < 0.65:
+        side = streak_side
+        score += 85
+        reasons.append(f"racha {streak_side}x{streak_len}")
+
+    # 2) Chop consistente -> contraria
+    if side is None and cr_s >= 0.70 and cr_l >= 0.65:
+        last_pb = next((x for x in reversed(win_s) if x in ("P", "B")), None)
+        if last_pb in ("P", "B"):
+            side = "B" if last_pb == "P" else "P"
+            score += 78
+            reasons.append(f"chop {cr_s:.2f}/{cr_l:.2f} contraria")
+
+    # 3) Doble confirmación limpia
+    if side is None:
+        filtered = [x for x in seq if x in ("P", "B")]
+        if len(filtered) >= 2 and filtered[-1] == filtered[-2] and ties_s == 0 and not (0.40 <= cr_s <= 0.60):
+            side = filtered[-1]
+            score += 65
+            reasons.append(f"doble {side}{side}")
+
+    if side is None:
+        score += 5
+        reasons.append("sin señal fuerte")
+
+    score = max(0, min(100, score))
+    return score, side, ", ".join(reasons)
+
+
+def decide_with_score(seq: List[str], sess: SessionState) -> Tuple[str, Optional[str], int, str]:
+    # state: NONE / POSSIBLE / CONFIRMED
+    if sess.danger_cooldown > 0:
+        return "NONE", None, 0, f"ANTI-TILT activo: {sess.danger_cooldown} ronda(s)."
+
+    score, side, detail = compute_signal_score(seq, sess)
+
+    if side is None or score < POSSIBLE_SCORE:
+        return "NONE", None, score, detail
+
+    if score >= CONFIRMED_SCORE:
+        return "CONFIRMED", side, score, detail
+
+    return "POSSIBLE", side, score, detail
 
 
 # ======================
@@ -440,7 +533,6 @@ def render_roadmap_6xn(seq: List[str]) -> str:
     header = "🧾 <b>ROADMAP (6xN)</b>"
     if truncated:
         header += f"\n<i>Mostrando últimos {len(trimmed)} resultados (recortado).</i>"
-
     return header + "\n" + "\n".join(lines)
 
 
@@ -484,15 +576,16 @@ def stats_block(seq: List[str]) -> str:
 
 
 def reco_block(seq: List[str], sess: SessionState) -> str:
-    action, detail = decide_action(seq, sess)
-    if action == "NO_BET":
+    state, side, score, detail = decide_with_score(seq, sess)
+
+    if state == "NONE" or side is None:
         return "🧠 <b>RECOMENDACIONES</b>\n• <b>NO BET</b>\n• " + detail
 
-    side = "P" if action == "BET_P" else "B"
     return (
         "🧠 <b>RECOMENDACIONES</b>\n"
-        f"• <b>POSIBLE APUESTA</b>\n"
+        f"• <b>{'CONFIRMADA' if state=='CONFIRMED' else 'POSIBLE'}</b>\n"
         f"• Próxima: {side_to_ball(side)}\n"
+        f"• Score: <b>{score}</b>\n"
         f"• {detail}"
     )
 
@@ -506,7 +599,7 @@ def bet_block(sess: SessionState) -> str:
         "🏦 <b>APUESTA</b>\n"
         f"• Banca: <b>{sess.bank_current:.0f}</b>\n"
         f"• Base: <b>{sess.base_bet:.0f}</b>\n"
-        f"• Gale: <b>{sess.gale_level}/{MAX_GALE}</b>\n"
+        f"• Gale: <b>{sess.gale_level}/2</b>\n"
         f"• 🎯 SL: <b>{sl:.0f}</b> | TP: <b>{tp:.0f}</b>"
     )
 
@@ -534,7 +627,6 @@ async def safe_delete_message(bot, chat_id: int, msg_id: int):
 async def ensure_dashboard(update: Optional[Update], context: ContextTypes.DEFAULT_TYPE, user_id: int):
     sess = get_session(user_id)
     seq = get_last_results(user_id, 300)
-
     text = build_dashboard_text(seq, sess)
 
     chat_id = None
@@ -571,7 +663,7 @@ async def ensure_dashboard(update: Optional[Update], context: ContextTypes.DEFAU
 
 
 # ======================
-# CHANNEL MESSAGES
+# CHANNEL MESSAGES (AnaPrime style)
 # ======================
 def text_posible_entrada() -> str:
     return (
@@ -581,15 +673,16 @@ def text_posible_entrada() -> str:
 
 
 def text_entrada_confirmada(bet_side: str, last_result: str) -> str:
-    ingresar = side_to_ball(last_result)  # última bola real
-    apuesta = side_to_ball(bet_side)      # cálculo IA
+    # last_result = última bola real (P/B/T)
+    ingresar = side_to_ball(last_result)
+    apuesta = side_to_ball(bet_side)
     return (
         "✅ <b>ENTRADA CONFIRMADA</b> ✅\n\n"
         "🎰 <b>Juego:</b> Bac Bo - Evolution\n"
         f"🧨<b>INGRESAR DESPUÉS:</b> {ingresar}\n"
         f"🔥 <b>APUESTA EN:</b> {apuesta}\n\n"
         "🔒 <b>PROTEGER EMPATE</b> con 10% (Opcional)\n\n"
-        f"🔁 <b>MÁXIMO {MAX_GALE} GALE</b>"
+        f"🔁 <b>MÁXIMO 2 GALE</b>"
     )
 
 
@@ -614,13 +707,26 @@ def text_tie() -> str:
     )
 
 
+# fallback si reply falla: NO se pierde el RED/GREEN
 async def channel_send(context: ContextTypes.DEFAULT_TYPE, text: str, reply_to: Optional[int] = None) -> int:
+    if reply_to:
+        try:
+            msg = await context.bot.send_message(
+                chat_id=int(CHANNEL_ID),
+                text=text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_to_message_id=int(reply_to),
+            )
+            return msg.message_id
+        except Exception:
+            pass
+
     msg = await context.bot.send_message(
         chat_id=int(CHANNEL_ID),
         text=text,
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
-        reply_to_message_id=reply_to if reply_to else None,
     )
     return msg.message_id
 
@@ -652,7 +758,7 @@ def settle_pending(sess: SessionState, actual_result: str) -> Tuple[SessionState
     else:
         outcome = "LOSE"
         bank -= bet
-        if gale < MAX_GALE:
+        if gale < 2:
             gale += 1
         else:
             gale = 0
@@ -674,12 +780,10 @@ def settle_pending(sess: SessionState, actual_result: str) -> Tuple[SessionState
 def touch_activity(user_id: int):
     set_session(user_id, last_activity_ts=int(time.time()))
 
-
 def is_inactive(sess: SessionState) -> bool:
     if not sess.last_activity_ts:
         return False
     return (time.time() - sess.last_activity_ts) > INACTIVITY_SECONDS
-
 
 def reset_for_inactivity(user_id: int):
     clear_rounds(user_id)
@@ -701,10 +805,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     touch_activity(user_id)
 
-    # borrar /start (best-effort)
     try:
-        if update.message:
-            await update.message.delete()
+        await update.message.delete()
     except Exception:
         pass
 
@@ -745,7 +847,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         start_session(user_id, bank)
 
-        # borrar mensaje del usuario (best-effort)
         try:
             await update.message.delete()
         except Exception:
@@ -754,7 +855,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ensure_dashboard(update, context, user_id)
         return
 
-    # mantener chat limpio
     try:
         await update.message.delete()
     except Exception:
@@ -813,9 +913,10 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clear_rounds(user_id)
         stop_session(user_id)
 
-        sess = get_session(user_id)
-        await channel_delete(context, sess.possible_msg_id)
-        set_session(user_id, possible_msg_id=None, confirmed_msg_id=None)
+        # borrar posible del canal si existe
+        sess_now = get_session(user_id)
+        await channel_delete(context, sess_now.possible_msg_id)
+        set_session(user_id, possible_msg_id=None, confirmed_msg_id=None, last_candidate_side=None, candidate_score=0, candidate_ts=0)
 
         await ensure_dashboard(update, context, user_id)
         return
@@ -824,17 +925,19 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ensure_dashboard(update, context, user_id)
         return
 
+    # ============ RESULT ADD ============
     if data.startswith("add_"):
-        result = data.split("_", 1)[1]
+        result = data.split("_", 1)[1]  # P/B/T
         add_round(user_id, result)
 
-        sess_now = get_session(user_id)
-        if sess_now.danger_cooldown > 0:
-            set_session(user_id, danger_cooldown=max(0, sess_now.danger_cooldown - 1))
-
+        # 1) resolver apuesta pendiente
         sess_before = get_session(user_id)
         sess_after, outcome = settle_pending(sess_before, result)
 
+        log.info("OUTCOME=%s pending_side=%s result=%s confirmed_msg_id=%s",
+                 outcome, sess_before.pending_side, result, sess_before.confirmed_msg_id)
+
+        # 2) publicar resultado (reply al mensaje de ENTRADA CONFIRMADA)
         if outcome in ("WIN", "LOSE", "TIE") and sess_before.confirmed_msg_id:
             if outcome == "WIN":
                 await channel_send(context, text_green(result_side=result), reply_to=sess_before.confirmed_msg_id)
@@ -843,36 +946,73 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await channel_send(context, text_tie(), reply_to=sess_before.confirmed_msg_id)
 
+        # stop/take
         stop_hit = check_stop_take(sess_after)
         if stop_hit in ("STOP_LOSS", "TAKE_PROFIT"):
             stop_session(user_id)
 
+        # 3) señales al canal por score (POSIBLE>=60, CONFIRMADA>=75)
         seq = get_last_results(user_id, 300)
         sess = get_session(user_id)
-        action, _detail = decide_action(seq, sess)
+        state, side, score, detail = decide_with_score(seq, sess)
+        now_ts = int(time.time())
 
-        if action.startswith("BET_"):
-            bet_side = "P" if action == "BET_P" else "B"
+        # Regla clave AnaPrime: CONFIRMADA solo después de existir POSIBLE antes
+        if state == "CONFIRMED" and sess.possible_msg_id is None:
+            state = "POSSIBLE"
 
-            if sess.possible_msg_id is None:
-                possible_id = await channel_send(context, text_posible_entrada())
-                set_session(user_id, possible_msg_id=possible_id)
-            else:
-                await channel_delete(context, sess.possible_msg_id)
-
-                last_result = seq[-1] if seq else bet_side
-                confirmed_id = await channel_send(context, text_entrada_confirmada(bet_side, last_result))
-
-                set_session(user_id, possible_msg_id=None, confirmed_msg_id=confirmed_id)
-
-                sess2 = get_session(user_id)
-                if sess2.is_active:
-                    bet = calc_next_bet(sess2)
-                    set_session(user_id, pending_side=bet_side, pending_bet=bet, awaiting_outcome=1)
-        else:
+        if state == "NONE" or side is None:
+            # borrar posible si existía
             if sess.possible_msg_id is not None:
                 await channel_delete(context, sess.possible_msg_id)
+            set_session(user_id, possible_msg_id=None, last_candidate_side=None, candidate_score=0, candidate_ts=0)
+
+        elif state == "POSSIBLE":
+            # si ya hay posible, pero cambia el lado -> borrar y reiniciar
+            if sess.possible_msg_id is not None and sess.last_candidate_side and side != sess.last_candidate_side:
+                await channel_delete(context, sess.possible_msg_id)
                 set_session(user_id, possible_msg_id=None)
+
+            # crear posible si no existe
+            sess2 = get_session(user_id)
+            if sess2.possible_msg_id is None:
+                possible_id = await channel_send(context, text_posible_entrada())
+                set_session(user_id, possible_msg_id=possible_id)
+
+            # guardar candidato
+            set_session(user_id, last_candidate_side=side, candidate_score=score, candidate_ts=now_ts)
+
+        else:  # CONFIRMED
+            can_confirm = True
+            if CONFIRM_SAME_SIDE_REQUIRED and sess.last_candidate_side and side != sess.last_candidate_side:
+                can_confirm = False
+
+            if can_confirm and sess.possible_msg_id is not None and sess.candidate_score >= POSSIBLE_SCORE:
+                # borrar posible
+                await channel_delete(context, sess.possible_msg_id)
+
+                last_result = seq[-1] if seq else side
+                confirmed_id = await channel_send(context, text_entrada_confirmada(side, last_result))
+                set_session(
+                    user_id,
+                    possible_msg_id=None,
+                    confirmed_msg_id=confirmed_id,
+                    last_candidate_side=None,
+                    candidate_score=0,
+                    candidate_ts=0
+                )
+
+                # armar pendiente (solo si sesión activa)
+                sess3 = get_session(user_id)
+                if sess3.is_active:
+                    bet = calc_next_bet(sess3)
+                    set_session(user_id, pending_side=side, pending_bet=bet, awaiting_outcome=1)
+            else:
+                # si no puede confirmar, vuelve a posible
+                if sess.possible_msg_id is None:
+                    possible_id = await channel_send(context, text_posible_entrada())
+                    set_session(user_id, possible_msg_id=possible_id)
+                set_session(user_id, last_candidate_side=side, candidate_score=score, candidate_ts=now_ts)
 
         await ensure_dashboard(update, context, user_id)
         return
@@ -903,11 +1043,11 @@ def webhook():
         return "Bot not ready", 503
 
     data = request.get_json(force=True, silent=True) or {}
-    update = Update.de_json(data, tg_app.bot)
+    upd = Update.de_json(data, tg_app.bot)
 
-    # ✅ MEJORADO: thread-safe sin coroutines raras
+    fut = asyncio.run_coroutine_threadsafe(tg_app.update_queue.put(upd), tg_loop)
     try:
-        tg_loop.call_soon_threadsafe(tg_app.update_queue.put_nowait, update)
+        fut.result(timeout=2)
     except Exception:
         return "Queue error", 500
 
@@ -921,7 +1061,6 @@ async def setup_webhook(application: Application):
 
 
 def start_telegram_in_thread():
-    """Mantiene vivo el loop de Telegram."""
     global tg_app, tg_loop
 
     tg_loop = asyncio.new_event_loop()
@@ -952,7 +1091,7 @@ def main():
     t.start()
 
     port = int(os.getenv("PORT", "10000"))
-    flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    flask_app.run(host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
