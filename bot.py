@@ -880,20 +880,22 @@ def home():
     return "OK - Bacbo bot activo ✅", 200
 
 # ====== MAIN ======
-async def start_bot():
+def start_bot_sync():
     init_db()
 
     TOKEN = os.getenv("BOT_TOKEN")
     CHANNEL_ID = os.getenv("CHANNEL_ID")  # debe ser -100xxxxxxxxxx
+
     if not TOKEN:
         raise RuntimeError("Falta BOT_TOKEN en Render (Environment Variables).")
-    if not CHANNEL_ID:
-        log.warning("⚠️ Falta CHANNEL_ID. El bot funcionará pero NO enviará al canal.")
-    else:
+
+    if CHANNEL_ID:
         try:
             CHANNEL_ID = int(CHANNEL_ID)
         except:
             raise RuntimeError("CHANNEL_ID debe ser numérico, ejemplo: -1001234567890")
+    else:
+        logging.warning("⚠️ Falta CHANNEL_ID. El bot funcionará pero NO enviará al canal.")
 
     request = HTTPXRequest(
         connect_timeout=20.0,
@@ -904,37 +906,39 @@ async def start_bot():
 
     app = Application.builder().token(TOKEN).request(request).build()
 
-    # Guardamos config en bot_data para usar en cualquier función
+    # Guardamos config en bot_data
     app.bot_data["CHANNEL_ID"] = CHANNEL_ID
-
-    # Stickers opcionales (si no los pones, solo manda texto)
     app.bot_data["GREEN_STICKER_FILE_ID"] = os.getenv("GREEN_STICKER_FILE_ID")
     app.bot_data["RED_STICKER_FILE_ID"] = os.getenv("RED_STICKER_FILE_ID")
     app.bot_data["TIE_STICKER_FILE_ID"] = os.getenv("TIE_STICKER_FILE_ID")
 
+    # Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("bank", bank_cmd))
     app.add_handler(CommandHandler("board", board_cmd))
     app.add_handler(CallbackQueryHandler(on_click))
     app.add_error_handler(error_handler)
 
-    log.info("✅ Bot iniciado (polling)...")
-    await app.run_polling(drop_pending_updates=True)
+    logging.info("✅ Bot iniciado (polling)...")
+
+    # ✅ IMPORTANTÍSIMO: run_polling NO se "await" y NO va dentro de asyncio.run()
+    app.run_polling(drop_pending_updates=True)
+
 
 def main():
     port = int(os.getenv("PORT", "10000"))
 
-    # Flask en hilo separado (NO toca el loop principal)
+    # Flask en un hilo aparte
     from threading import Thread
 
     def run_web():
-        # dev server OK para ping; Render free lo aguanta
         flask_app.run(host="0.0.0.0", port=port)
 
     Thread(target=run_web, daemon=True).start()
 
-    # Telegram en el hilo principal (evita errores de signals/event loop)
-    asyncio.run(start_bot())
+    # ✅ Telegram SIEMPRE en el hilo principal
+    start_bot_sync()
+
 
 if __name__ == "__main__":
     main()
