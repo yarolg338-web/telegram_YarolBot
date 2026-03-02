@@ -32,6 +32,7 @@ logger = logging.getLogger("bacbo")
 DB_PATH = "bacbo.db"
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip()  # -100xxxx
+
 GREEN_STICKER_ID = os.getenv("GREEN_STICKER_ID", "").strip()
 RED_STICKER_ID = os.getenv("RED_STICKER_ID", "").strip()
 
@@ -51,25 +52,18 @@ DANGER_COOLDOWN_ROUNDS = 3
 
 # ROADMAP 6xN
 ROADMAP_ROWS = 6
-ROADMAP_MAX_RESULTS = 240  # limitar para no pasarnos de tamaño de mensaje en Telegram
-
-# POSIBLE ENTRADA delay (segundos)
-POSSIBLE_CONFIRM_DELAY = 8
+ROADMAP_MAX_RESULTS = 240  # evita mensajes demasiado largos
 
 # =========================
-# EMOJIS (como en tu ejemplo)
-# PLAYER = 🔵, BANKER = 🔴, TIE = 🟠
+# EMOJIS
 # =========================
 def ball(result: str) -> str:
+    # P=🔵, B=🔴, T=🟠
     if result == "P":
         return "🔵"
     if result == "B":
         return "🔴"
-    return "🟠"  # TIE
-
-
-def side_name(side: str) -> str:
-    return "PLAYER" if side == "P" else "BANKER"
+    return "🟠"
 
 
 def side_ball(side: str) -> str:
@@ -106,7 +100,7 @@ def init_db():
         base_bet REAL NOT NULL DEFAULT 0,
         gale_level INTEGER NOT NULL DEFAULT 0,
 
-        -- pending bet
+        -- pending bet (solo existe DESPUÉS de ENTRADA CONFIRMADA)
         pending_side TEXT DEFAULT NULL,
         pending_bet REAL NOT NULL DEFAULT 0,
         awaiting_outcome INTEGER NOT NULL DEFAULT 0,
@@ -177,7 +171,6 @@ class SessionState:
     awaiting_outcome: bool
 
     danger_cooldown: int
-
     awaiting_bank: bool
 
     dashboard_chat_id: Optional[int]
@@ -277,11 +270,9 @@ def calc_next_bet(sess: SessionState) -> float:
     base = round_to_allowed(float(sess.base_bet))
     if int(base) not in ALLOWED_BETS:
         base = float(ALLOWED_BETS[0])
-
     idx = ALLOWED_BETS.index(int(base))
     if sess.gale_level == 0:
         return float(ALLOWED_BETS[idx])
-
     next_idx = min(idx + 1, len(ALLOWED_BETS) - 1)
     return float(ALLOWED_BETS[next_idx])
 
@@ -341,7 +332,6 @@ def count_ties(seq: List[str]) -> int:
 def is_danger_table(seq: List[str]) -> Tuple[bool, str]:
     if len(seq) < 12:
         return False, ""
-
     win = seq[-WINDOW_N:] if len(seq) >= WINDOW_N else seq[:]
     ties = count_ties(win)
     cr = chop_rate(win)
@@ -404,29 +394,20 @@ def decide_action(seq: List[str], sess: SessionState) -> Tuple[str, str]:
 def build_roadmap(seq: List[str]) -> str:
     if not seq:
         return ""
-
-    seq = seq[-ROADMAP_MAX_RESULTS:]  # limitar tamaño
-
+    seq = seq[-ROADMAP_MAX_RESULTS:]
     cols = math.ceil(len(seq) / ROADMAP_ROWS)
     grid = [["  " for _ in range(cols)] for _ in range(ROADMAP_ROWS)]
-
     for i, r in enumerate(seq):
         c = i // ROADMAP_ROWS
         rr = i % ROADMAP_ROWS
         grid[rr][c] = ball(r)
-
-    lines = []
-    for rr in range(ROADMAP_ROWS):
-        lines.append(" ".join(grid[rr]).rstrip())
-
-    return "\n".join(lines)
+    return "\n".join(" ".join(row).rstrip() for row in grid)
 
 
 # =========================
 # DASHBOARD (PRIVATE CHAT)
 # =========================
 def dashboard_text(seq: List[str], sess: SessionState) -> str:
-    # Si historial eliminado y no se ha iniciado apuesta => panel vacío (sin stats/roadmap)
     if not sess.panel_enabled:
         return (
             "📌 <b>DASHBOARD</b>\n"
@@ -438,7 +419,6 @@ def dashboard_text(seq: List[str], sess: SessionState) -> str:
     p = seq.count("P")
     b = seq.count("B")
     t = seq.count("T")
-
     pct = lambda x: (x / total * 100.0) if total else 0.0
 
     action, detail = decide_action(seq, sess)
@@ -470,7 +450,6 @@ def dashboard_text(seq: List[str], sess: SessionState) -> str:
         )
 
     roadmap_block = "\n🧾 <b>ROADMAP (6xN)</b>\n" + (roadmap if roadmap else "—")
-
     return stats_block + reco_block + bank_block + roadmap_block
 
 
@@ -505,7 +484,6 @@ async def safe_edit_message(bot, chat_id: int, msg_id: int, text: str, reply_mar
     except BadRequest as e:
         if "Message is not modified" in str(e):
             return
-        # Si el mensaje ya no existe, lo dejamos pasar
         logger.warning("Edit failed: %s", e)
     except (TimedOut, NetworkError):
         return
@@ -518,7 +496,6 @@ async def upsert_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = update.effective_chat.id
 
-    # si no hay dashboard guardado, lo creamos
     if not sess.dashboard_chat_id or not sess.dashboard_msg_id or sess.dashboard_chat_id != chat_id:
         msg = await context.bot.send_message(
             chat_id=chat_id,
@@ -529,12 +506,11 @@ async def upsert_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_session(dashboard_chat_id=chat_id, dashboard_msg_id=msg.message_id)
         return
 
-    # editar dashboard existente
     await safe_edit_message(context.bot, sess.dashboard_chat_id, sess.dashboard_msg_id, text, reply_markup=main_menu_kb())
 
 
 # =========================
-# CHANNEL MESSAGES (AnaPrime style)
+# CHANNEL (AnaPrime style)
 # =========================
 async def delete_channel_message(context: ContextTypes.DEFAULT_TYPE, msg_id: Optional[int]):
     if not CHANNEL_ID or not msg_id:
@@ -548,7 +524,6 @@ async def delete_channel_message(context: ContextTypes.DEFAULT_TYPE, msg_id: Opt
 async def send_possible_entry(context: ContextTypes.DEFAULT_TYPE, side: str):
     if not CHANNEL_ID:
         return
-
     txt = (
         "🚨<b>ATENCIÓN POSIBLE ENTRADA</b>🚨\n"
         "🎰 <b>Juego:</b> Bac Bo - Evolution"
@@ -562,16 +537,11 @@ async def send_possible_entry(context: ContextTypes.DEFAULT_TYPE, side: str):
 
 
 async def send_confirmed_entry(context: ContextTypes.DEFAULT_TYPE, last_seen_result: str, bet_side: str):
-    """
-    ENTRADA CONFIRMADA:
-    - INGRESAR DESPUÉS: bola del resultado anterior (lo que "apareció antes")
-    - APUESTA EN: bola del cálculo (bet_side)
-    """
     if not CHANNEL_ID:
         return
 
-    ingresar_despues_ball = ball(last_seen_result)
-    apuesta_ball = side_ball(bet_side)
+    ingresar_despues_ball = ball(last_seen_result)   # lo que acaba de salir
+    apuesta_ball = side_ball(bet_side)               # lo que el cálculo dice
 
     txt = (
         "✅ <b>ENTRADA CONFIRMADA</b> ✅\n\n"
@@ -591,10 +561,6 @@ async def send_confirmed_entry(context: ContextTypes.DEFAULT_TYPE, last_seen_res
 
 
 async def reply_result_to_confirmed(context: ContextTypes.DEFAULT_TYPE, kind: str, actual_result: str):
-    """
-    kind: GREEN / RED / TIE
-    Responde al mensaje de ENTRADA CONFIRMADA.
-    """
     if not CHANNEL_ID:
         return
 
@@ -653,14 +619,9 @@ async def reply_result_to_confirmed(context: ContextTypes.DEFAULT_TYPE, kind: st
 
 
 # =========================
-# BET SETTLEMENT
+# SETTLE PENDING BET (solo después de confirmada)
 # =========================
 def settle_pending_bet(sess: SessionState, actual_result: str) -> Tuple[SessionState, str]:
-    """
-    Actualiza banca y gale basado en pending_side/pending_bet.
-    Retorna (sess_updated, outcome_kind)
-    outcome_kind: GREEN / RED / TIE / ""
-    """
     if not (sess.is_active and sess.awaiting_outcome and sess.pending_side in ("P", "B") and sess.pending_bet > 0):
         return sess, ""
 
@@ -670,15 +631,11 @@ def settle_pending_bet(sess: SessionState, actual_result: str) -> Tuple[SessionS
     gale = int(sess.gale_level)
 
     if actual_result == "T":
-        # Push
-        outcome_kind = "TIE"
-        outcome_txt = "TIE"
-        # banca no cambia, gale no cambia (podrías resetear si quisieras)
+        outcome_kind = "TIE"  # push
     elif actual_result == side:
         bank += bet
         gale = 0
         outcome_kind = "GREEN"
-        outcome_txt = "WIN"
     else:
         bank -= bet
         if gale < MAX_GALE:
@@ -686,7 +643,6 @@ def settle_pending_bet(sess: SessionState, actual_result: str) -> Tuple[SessionS
         else:
             gale = 0
         outcome_kind = "RED"
-        outcome_txt = "LOSE"
 
     set_session(
         bank_current=bank,
@@ -700,66 +656,72 @@ def settle_pending_bet(sess: SessionState, actual_result: str) -> Tuple[SessionS
 
 
 # =========================
-# POSSIBLE ENTRY FLOW
-# - se manda POSIBLE ENTRADA
-# - luego de X segundos re-evalúa:
-#   - si se mantiene => borra posible, manda confirmada
-#   - si cambió/no bet => borra posible y listo
+# CORE: after each result, decide POSIBLE / CONFIRMADA like you described
 # =========================
-async def possible_flow_job(context: ContextTypes.DEFAULT_TYPE):
+async def handle_possible_and_confirmed(context: ContextTypes.DEFAULT_TYPE, seq: List[str]):
+    """
+    Esto implementa:
+    - 1er BET => POSIBLE ENTRADA
+    - 2do BET consecutivo (mismo lado) => CONFIRMADA
+    - Si cambia/no bet => borrar posible
+    """
     sess = get_session()
-    seq = get_last_results(300)
 
-    # si no hay resultados suficientes, borrar posible y listo
+    if not sess.is_active:
+        # si no hay apuesta activa, no spameamos canal
+        if sess.possible_msg_id:
+            await delete_channel_message(context, sess.possible_msg_id)
+            set_session(possible_msg_id=None, last_possible_side=None)
+        return
+
     if len(seq) < 10:
-        await delete_channel_message(context, sess.possible_msg_id)
-        set_session(possible_msg_id=None, last_possible_side=None)
+        # no hay suficiente lectura
+        if sess.possible_msg_id:
+            await delete_channel_message(context, sess.possible_msg_id)
+            set_session(possible_msg_id=None, last_possible_side=None)
         return
 
     action, _ = decide_action(seq, sess)
+
     if action not in ("BET_P", "BET_B"):
-        # cambió => borrar posible
-        await delete_channel_message(context, sess.possible_msg_id)
-        set_session(possible_msg_id=None, last_possible_side=None)
+        # NO_BET => borrar posible si existe
+        if sess.possible_msg_id:
+            await delete_channel_message(context, sess.possible_msg_id)
+            set_session(possible_msg_id=None, last_possible_side=None)
         return
 
     side = "P" if action == "BET_P" else "B"
 
-    # si cambió de lado
-    if sess.last_possible_side and side != sess.last_possible_side:
-        await delete_channel_message(context, sess.possible_msg_id)
-        set_session(possible_msg_id=None, last_possible_side=None)
+    # Si NO había posible => mandar posible
+    if not sess.possible_msg_id:
+        await send_possible_entry(context, side=side)
         return
 
-    # confirmar
-    last_seen = seq[-1]
-    await delete_channel_message(context, sess.possible_msg_id)
-    set_session(possible_msg_id=None, last_possible_side=None)
+    # Si había posible:
+    if sess.last_possible_side == side:
+        # CONFIRMAR: borrar posible + enviar confirmada
+        await delete_channel_message(context, sess.possible_msg_id)
+        set_session(possible_msg_id=None, last_possible_side=None)
 
-    await send_confirmed_entry(context, last_seen_result=last_seen, bet_side=side)
+        last_seen = seq[-1]  # lo que acaba de salir (para INGRESAR DESPUÉS)
+        await send_confirmed_entry(context, last_seen_result=last_seen, bet_side=side)
 
-    # Armar apuesta pendiente internamente (para que al registrar siguiente resultado, calcule win/lose)
-    # bet se calcula desde banca
-    sess2 = get_session()
-    if sess2.is_active:
+        # Armar apuesta pendiente (para que el PRÓXIMO resultado defina GREEN/RED/TIE)
+        sess2 = get_session()
         bet_amt = calc_next_bet(sess2)
         set_session(pending_side=side, pending_bet=bet_amt, awaiting_outcome=1)
+        return
 
-
-def schedule_possible_flow(application: Application):
-    # limpia job previo
-    for j in application.job_queue.jobs():
-        if j.name == "possible_flow":
-            j.schedule_removal()
-
-    application.job_queue.run_once(possible_flow_job, when=POSSIBLE_CONFIRM_DELAY, name="possible_flow")
+    # Si cambió el lado => borrar posible y enviar nueva posible
+    await delete_channel_message(context, sess.possible_msg_id)
+    set_session(possible_msg_id=None, last_possible_side=None)
+    await send_possible_entry(context, side=side)
 
 
 # =========================
 # HANDLERS
 # =========================
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Registrar dashboard y mostrarlo
     await upsert_dashboard(update, context)
 
 
@@ -774,7 +736,6 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sess = get_session()
 
     if data == "menu_add":
-        # Mostrar teclado de resultados (editando el dashboard si existe)
         if sess.dashboard_chat_id and sess.dashboard_msg_id:
             await safe_edit_message(
                 context.bot,
@@ -790,64 +751,49 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data in ("add_P", "add_B", "add_T"):
         result = data.split("_", 1)[1]
 
-        # guardar ronda
+        # 1) guardar ronda
         add_round(result)
 
-        # bajar cooldown
+        # 2) bajar cooldown
         s = get_session()
         if s.danger_cooldown > 0:
             set_session(danger_cooldown=max(0, s.danger_cooldown - 1))
 
-        # si había apuesta pendiente => liquidar
+        # 3) liquidar apuesta pendiente (si venía de confirmada anterior)
         s_before = get_session()
         s_after, outcome_kind = settle_pending_bet(s_before, result)
 
-        # publicar GREEN/RED/TIE en canal (respondiendo a entrada confirmada)
+        # 4) publicar GREEN/RED/TIE respondiendo a confirmada
         if outcome_kind in ("GREEN", "RED", "TIE"):
             await reply_result_to_confirmed(context, outcome_kind, result)
 
-        # stop-loss / take-profit
+        # 5) stop-loss / take-profit
         hit = check_stop_take(s_after)
         if hit:
-            # si toca cerrar, cerramos sesión
             stop_session()
 
-        # evaluar posible entrada automática (si hay panel activo y hay apuesta activa)
+        # 6) calcular posible/confirmada (según tu lógica por eventos)
         seq = get_last_results(300)
-        s_now = get_session()
-        if s_now.is_active and len(seq) >= 10:
-            action, _ = decide_action(seq, s_now)
-            if action in ("BET_P", "BET_B"):
-                side = "P" if action == "BET_P" else "B"
+        await handle_possible_and_confirmed(context, seq)
 
-                # si ya hay posible, lo reemplazamos (pero realmente lo borraremos si cambia)
-                if s_now.possible_msg_id:
-                    await delete_channel_message(context, s_now.possible_msg_id)
-                    set_session(possible_msg_id=None, last_possible_side=None)
-
-                await send_possible_entry(context, side=side)
-                schedule_possible_flow(context.application)
-
-        # Volver al dashboard principal actualizado
+        # 7) volver al dashboard actualizado
         await upsert_dashboard(update, context)
         return
 
     if data == "menu_start_bet":
-        # pedir monto por mensaje
         set_session(awaiting_bank=1)
-        # volver al dashboard pero con aviso
-        await q.message.reply_text("Envía el monto así:\n<b>33500</b>\n(o <code>/bank 33500</code>)", parse_mode=ParseMode.HTML)
+        await q.message.reply_text(
+            "Envía el monto así:\n<b>33500</b>\n(o <code>/bank 33500</code>)",
+            parse_mode=ParseMode.HTML
+        )
         await upsert_dashboard(update, context)
         return
 
     if data == "menu_reset":
-        # BORRAR HISTORIAL + dejar panel vacío hasta iniciar apuesta
         clear_rounds()
         stop_session()
-        # panel vacío (esto cumple tu punto 5)
         set_session(panel_enabled=0)
 
-        # borrar posible entrada si existía
         sess2 = get_session()
         if sess2.possible_msg_id:
             await delete_channel_message(context, sess2.possible_msg_id)
@@ -862,7 +808,6 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def bank_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # /bank 33500
     if not context.args:
         await update.message.reply_text("Uso: /bank <monto>\nEj: /bank 33500")
         return
@@ -880,13 +825,11 @@ async def bank_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def plain_amount_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # si awaiting_bank=1, aceptar número simple
     sess = get_session()
     if not sess.awaiting_bank:
         return
 
     text = (update.message.text or "").strip()
-    # permitir "33.500" o "33,500"
     clean = text.replace(".", "").replace(",", "")
     if not clean.isdigit():
         await update.message.reply_text("Envíame solo el número. Ej: 33500")
@@ -911,7 +854,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# HEALTHCHECK (Render ping)
+# HEALTHCHECK (Render)
 # =========================
 flask_app = Flask(__name__)
 
@@ -929,7 +872,7 @@ def run_web():
 # BOOT
 # =========================
 async def post_init(app: Application):
-    # evita conflicto con webhooks activos
+    # asegura que no haya webhook activo (evita 409)
     try:
         await app.bot.delete_webhook(drop_pending_updates=True)
     except Exception:
@@ -942,7 +885,6 @@ def main():
 
     init_db()
 
-    # Iniciar servidor web en hilo aparte (no toca el event loop)
     from threading import Thread
     Thread(target=run_web, daemon=True).start()
 
