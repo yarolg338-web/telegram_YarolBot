@@ -323,7 +323,6 @@ def calc_next_bet(sess: SessionState) -> float:
     if sess.gale_level == 0:
         return float(ALLOWED_BETS[idx])
 
-    # sube 1 escalón por gale (hasta MAX_GALE)
     next_idx = min(idx + 1, len(ALLOWED_BETS) - 1)
     return float(ALLOWED_BETS[next_idx])
 
@@ -400,7 +399,6 @@ def is_danger_table(seq: List[str]) -> Tuple[bool, str]:
 
 # ===== SCORE ENGINE =====
 def compute_signal_score(seq: List[str], sess: SessionState) -> Tuple[int, Optional[str], str]:
-    # score 0..100, side 'P'/'B'/None, detalle
     if len(seq) < 12:
         return 0, None, "Pocas rondas (min 12)."
     if seq[-1] == "T":
@@ -426,7 +424,6 @@ def compute_signal_score(seq: List[str], sess: SessionState) -> Tuple[int, Optio
     score = 0
     reasons = []
 
-    # Castigos por empate/ruido
     if ties_s >= 2:
         score -= 25
         reasons.append("ties corto")
@@ -434,25 +431,21 @@ def compute_signal_score(seq: List[str], sess: SessionState) -> Tuple[int, Optio
         score -= 20
         reasons.append("ties largo")
 
-    # chop medio = zona random
     if 0.40 <= cr_s <= 0.60 and 0.40 <= cr_l <= 0.60:
         score -= 35
         reasons.append("chop medio")
 
-    # contradicción corto vs largo
     if (cr_s >= 0.70 and 0.40 <= cr_l <= 0.60) or (0.40 <= cr_s <= 0.60 and cr_l >= 0.70):
         score -= 25
         reasons.append("ventanas no concuerdan")
 
     side = None
 
-    # 1) Racha fuerte
     if streak_side in ("P", "B") and streak_len >= 4 and cr_l < 0.65:
         side = streak_side
         score += 85
         reasons.append(f"racha {streak_side}x{streak_len}")
 
-    # 2) Chop consistente -> contraria
     if side is None and cr_s >= 0.70 and cr_l >= 0.65:
         last_pb = next((x for x in reversed(win_s) if x in ("P", "B")), None)
         if last_pb in ("P", "B"):
@@ -460,7 +453,6 @@ def compute_signal_score(seq: List[str], sess: SessionState) -> Tuple[int, Optio
             score += 78
             reasons.append(f"chop {cr_s:.2f}/{cr_l:.2f} contraria")
 
-    # 3) Doble confirmación limpia
     if side is None:
         filtered = [x for x in seq if x in ("P", "B")]
         if len(filtered) >= 2 and filtered[-1] == filtered[-2] and ties_s == 0 and not (0.40 <= cr_s <= 0.60):
@@ -477,7 +469,6 @@ def compute_signal_score(seq: List[str], sess: SessionState) -> Tuple[int, Optio
 
 
 def decide_with_score(seq: List[str], sess: SessionState) -> Tuple[str, Optional[str], int, str]:
-    # state: NONE / POSSIBLE / CONFIRMED
     if sess.danger_cooldown > 0:
         return "NONE", None, 0, f"ANTI-TILT activo: {sess.danger_cooldown} ronda(s)."
 
@@ -609,7 +600,7 @@ async def safe_delete_message(bot, chat_id: int, msg_id: int):
         return
 
 
-# ✅✅✅ MODIFICADO: DASHBOARD ÚNICO (evita duplicados si borras el mensaje)
+# ✅✅✅ DASHBOARD ÚNICO
 async def ensure_dashboard(update: Optional[Update], context: ContextTypes.DEFAULT_TYPE, user_id: int):
     sess = get_session(user_id)
     seq = get_last_results(user_id, 300)
@@ -624,7 +615,6 @@ async def ensure_dashboard(update: Optional[Update], context: ContextTypes.DEFAU
     if not chat_id:
         return
 
-    # 1) Intentar editar el dashboard actual
     if sess.dashboard_chat_id == chat_id and sess.dashboard_msg_id:
         try:
             await context.bot.edit_message_text(
@@ -637,12 +627,8 @@ async def ensure_dashboard(update: Optional[Update], context: ContextTypes.DEFAU
             )
             return
         except BadRequest:
-            # Si no se puede editar (porque lo borraste o no existe),
-            # eliminamos el ID guardado para evitar duplicados
-            await safe_delete_message(context.bot, chat_id, sess.dashboard_msg_id)
             set_session(user_id, dashboard_msg_id=None)
 
-    # 2) Crear UNO nuevo y guardar su ID
     msg = await context.bot.send_message(
         chat_id=chat_id,
         text=text,
@@ -664,8 +650,6 @@ def text_posible_entrada() -> str:
 
 
 def text_entrada_confirmada(bet_side: str, last_result: str) -> str:
-    # ✅ Estilo gatillo AnaPrime:
-    # "INGRESAR DESPUÉS" SIEMPRE es la CONTRARIA a la apuesta (nunca 🔵/🔵 o 🔴/🔴)
     ingresar = side_to_ball(opposite_side(bet_side))
     apuesta = side_to_ball(bet_side)
 
@@ -700,7 +684,6 @@ def text_tie() -> str:
     )
 
 
-# fallback si reply falla: NO se pierde el RED/GREEN
 async def channel_send(context: ContextTypes.DEFAULT_TYPE, text: str, reply_to: Optional[int] = None) -> int:
     if reply_to:
         try:
@@ -924,19 +907,16 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ensure_dashboard(update, context, user_id)
         return
 
-    # ============ RESULT ADD ============
     if data.startswith("add_"):
-        result = data.split("_", 1)[1]  # P/B/T
+        result = data.split("_", 1)[1]
         add_round(user_id, result)
 
-        # 1) resolver apuesta pendiente
         sess_before = get_session(user_id)
         sess_after, outcome = settle_pending(sess_before, result)
 
         log.info("OUTCOME=%s pending_side=%s result=%s confirmed_msg_id=%s gale_after=%s",
                  outcome, sess_before.pending_side, result, sess_before.confirmed_msg_id, sess_after.gale_level)
 
-        # 2) publicar resultado (reply al mensaje de ENTRADA CONFIRMADA)
         if outcome in ("WIN", "LOSE", "TIE") and sess_before.confirmed_msg_id:
             if outcome == "WIN":
                 await channel_send(context, text_green(result_side=result), reply_to=sess_before.confirmed_msg_id)
@@ -945,7 +925,6 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await channel_send(context, text_tie(), reply_to=sess_before.confirmed_msg_id)
 
-        # ✅ Cierre de ciclo cuando GANA o TIE (permite nuevas señales)
         if outcome in ("WIN", "TIE"):
             set_session(
                 user_id,
@@ -956,11 +935,10 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 candidate_ts=0
             )
 
-        # ✅ Si PIERDE y toca GALE => mandar NUEVA ENTRADA CONFIRMADA (misma apuesta) y no spamear otras señales
         if outcome == "LOSE":
             sess_now = get_session(user_id)
             if sess_now.is_active and sess_now.gale_level > 0 and sess_now.gale_level <= MAX_GALE:
-                gale_side = sess_before.pending_side  # 'P' o 'B'
+                gale_side = sess_before.pending_side
                 if gale_side in ("P", "B") and sess_before.confirmed_msg_id:
                     gale_text = text_entrada_confirmada(gale_side, last_result=result) + f"\n\n🔁 <b>GALE {sess_now.gale_level}/{MAX_GALE}</b>"
                     gale_confirmed_id = await channel_send(context, gale_text, reply_to=sess_before.confirmed_msg_id)
@@ -991,18 +969,15 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     candidate_ts=0
                 )
 
-        # stop/take
         stop_hit = check_stop_take(sess_after)
         if stop_hit in ("STOP_LOSS", "TAKE_PROFIT"):
             stop_session(user_id)
 
-        # ✅ Regla AnaPrime: si hay una entrada activa esperando resultado, NO generar nuevas POSIBLE/CONFIRMADA
         sess_guard = get_session(user_id)
         if sess_guard.awaiting_outcome:
             await ensure_dashboard(update, context, user_id)
             return
 
-        # 3) señales al canal por score (POSIBLE>=60, CONFIRMADA>=75)
         seq = get_last_results(user_id, 300)
         sess = get_session(user_id)
         state, side, score, detail = decide_with_score(seq, sess)
@@ -1028,7 +1003,7 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             set_session(user_id, last_candidate_side=side, candidate_score=score, candidate_ts=now_ts)
 
-        else:  # CONFIRMED
+        else:
             can_confirm = True
             if CONFIRM_SAME_SIDE_REQUIRED and sess.last_candidate_side and side != sess.last_candidate_side:
                 can_confirm = False
@@ -1123,7 +1098,8 @@ def start_telegram_in_thread():
         await tg_app.start()
         log.info("✅ Bot iniciado (WEBHOOK).")
 
-    tg_loop.create_task(runner)
+    # ✅✅✅ FIX DEL ERROR: debe ser runner() (corutina), no runner (función)
+    tg_loop.create_task(runner())
     tg_loop.run_forever()
 
 
