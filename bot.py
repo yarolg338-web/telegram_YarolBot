@@ -569,9 +569,9 @@ def text_posible_entrada() -> str:
     )
 
 
-def text_entrada_confirmada(bet_side: str) -> str:
-    ingresar = side_to_ball(opposite_side(bet_side))
-    apuesta = side_to_ball(bet_side)
+def text_entrada_confirmada(bet_side: str, last_result: str) -> str:
+    ingresar = side_to_ball(last_result)   # última bola real
+    apuesta = side_to_ball(bet_side)       # cálculo IA
     return (
         "✅ <b>ENTRADA CONFIRMADA</b> ✅\n\n"
         "🎰 <b>Juego:</b> Bac Bo - Evolution\n"
@@ -843,7 +843,12 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 set_session(user_id, possible_msg_id=possible_id)
             else:
                 await channel_delete(context, sess.possible_msg_id)
-                confirmed_id = await channel_send(context, text_entrada_confirmada(bet_side))
+                last_result = seq[-1] if seq else bet_side
+
+confirmed_id = await channel_send(
+    context,
+    text_entrada_confirmada(bet_side, last_result)
+)
                 set_session(user_id, possible_msg_id=None, confirmed_msg_id=confirmed_id)
 
                 sess2 = get_session(user_id)
