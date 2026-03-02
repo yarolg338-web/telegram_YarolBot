@@ -52,6 +52,8 @@ POSSIBLE_SCORE = 60
 CONFIRMED_SCORE = 75
 CONFIRM_SAME_SIDE_REQUIRED = True  # confirmar solo si mantiene el lado (más conservador)
 
+MAX_GALE = 2  # ✅ importante: máximo 2 gales (AnaPrime)
+
 # ======================
 # ENV
 # ======================
@@ -177,26 +179,6 @@ def get_session(user_id: int) -> SessionState:
         row = cur.fetchone()
     con.close()
 
-    # indices:
-    # 0 user_id
-    # 1 is_active
-    # 2 bank_start
-    # 3 bank_current
-    # 4 base_bet
-    # 5 gale_level
-    # 6 pending_side
-    # 7 pending_bet
-    # 8 awaiting_outcome
-    # 9 danger_cooldown
-    # 10 awaiting_bank
-    # 11 dashboard_chat_id
-    # 12 dashboard_msg_id
-    # 13 possible_msg_id
-    # 14 confirmed_msg_id
-    # 15 last_candidate_side
-    # 16 candidate_score
-    # 17 candidate_ts
-    # 18 last_activity_ts
     return SessionState(
         user_id=row[0],
         is_active=bool(row[1]),
@@ -281,6 +263,8 @@ def side_to_ball(side: str) -> str:
         return "🔴"
     return "🟠"
 
+def opposite_side(side: str) -> str:
+    return "B" if side == "P" else "P"
 
 def round_to_allowed(amount: float) -> float:
     for v in ALLOWED_BETS:
@@ -339,6 +323,7 @@ def calc_next_bet(sess: SessionState) -> float:
     if sess.gale_level == 0:
         return float(ALLOWED_BETS[idx])
 
+    # sube 1 escalón por gale (hasta MAX_GALE)
     next_idx = min(idx + 1, len(ALLOWED_BETS) - 1)
     return float(ALLOWED_BETS[next_idx])
 
@@ -461,7 +446,7 @@ def compute_signal_score(seq: List[str], sess: SessionState) -> Tuple[int, Optio
 
     side = None
 
-    # 1) Racha fuerte (más conservador)
+    # 1) Racha fuerte
     if streak_side in ("P", "B") and streak_len >= 4 and cr_l < 0.65:
         side = streak_side
         score += 85
@@ -599,7 +584,7 @@ def bet_block(sess: SessionState) -> str:
         "🏦 <b>APUESTA</b>\n"
         f"• Banca: <b>{sess.bank_current:.0f}</b>\n"
         f"• Base: <b>{sess.base_bet:.0f}</b>\n"
-        f"• Gale: <b>{sess.gale_level}/2</b>\n"
+        f"• Gale: <b>{sess.gale_level}/{MAX_GALE}</b>\n"
         f"• 🎯 SL: <b>{sl:.0f}</b> | TP: <b>{tp:.0f}</b>"
     )
 
@@ -673,16 +658,18 @@ def text_posible_entrada() -> str:
 
 
 def text_entrada_confirmada(bet_side: str, last_result: str) -> str:
-    # last_result = última bola real (P/B/T)
-    ingresar = side_to_ball(last_result)
+    # ✅ Estilo gatillo AnaPrime:
+    # "INGRESAR DESPUÉS" SIEMPRE es la CONTRARIA a la apuesta (nunca 🔵/🔵 o 🔴/🔴)
+    ingresar = side_to_ball(opposite_side(bet_side))
     apuesta = side_to_ball(bet_side)
+
     return (
         "✅ <b>ENTRADA CONFIRMADA</b> ✅\n\n"
         "🎰 <b>Juego:</b> Bac Bo - Evolution\n"
         f"🧨<b>INGRESAR DESPUÉS:</b> {ingresar}\n"
         f"🔥 <b>APUESTA EN:</b> {apuesta}\n\n"
         "🔒 <b>PROTEGER EMPATE</b> con 10% (Opcional)\n\n"
-        f"🔁 <b>MÁXIMO 2 GALE</b>"
+        f"🔁 <b>MÁXIMO {MAX_GALE} GALE</b>"
     )
 
 
@@ -758,7 +745,7 @@ def settle_pending(sess: SessionState, actual_result: str) -> Tuple[SessionState
     else:
         outcome = "LOSE"
         bank -= bet
-        if gale < 2:
+        if gale < MAX_GALE:
             gale += 1
         else:
             gale = 0
@@ -913,10 +900,16 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clear_rounds(user_id)
         stop_session(user_id)
 
-        # borrar posible del canal si existe
         sess_now = get_session(user_id)
         await channel_delete(context, sess_now.possible_msg_id)
-        set_session(user_id, possible_msg_id=None, confirmed_msg_id=None, last_candidate_side=None, candidate_score=0, candidate_ts=0)
+        set_session(
+            user_id,
+            possible_msg_id=None,
+            confirmed_msg_id=None,
+            last_candidate_side=None,
+            candidate_score=0,
+            candidate_ts=0
+        )
 
         await ensure_dashboard(update, context, user_id)
         return
@@ -934,8 +927,8 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sess_before = get_session(user_id)
         sess_after, outcome = settle_pending(sess_before, result)
 
-        log.info("OUTCOME=%s pending_side=%s result=%s confirmed_msg_id=%s",
-                 outcome, sess_before.pending_side, result, sess_before.confirmed_msg_id)
+        log.info("OUTCOME=%s pending_side=%s result=%s confirmed_msg_id=%s gale_after=%s",
+                 outcome, sess_before.pending_side, result, sess_before.confirmed_msg_id, sess_after.gale_level)
 
         # 2) publicar resultado (reply al mensaje de ENTRADA CONFIRMADA)
         if outcome in ("WIN", "LOSE", "TIE") and sess_before.confirmed_msg_id:
@@ -946,10 +939,66 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await channel_send(context, text_tie(), reply_to=sess_before.confirmed_msg_id)
 
+        # ✅ Cierre de ciclo cuando GANA o TIE (permite nuevas señales)
+        if outcome in ("WIN", "TIE"):
+            set_session(
+                user_id,
+                possible_msg_id=None,
+                confirmed_msg_id=None,
+                last_candidate_side=None,
+                candidate_score=0,
+                candidate_ts=0
+            )
+
+        # ✅ Si PIERDE y toca GALE => mandar NUEVA ENTRADA CONFIRMADA (misma apuesta) y no spamear otras señales
+        if outcome == "LOSE":
+            sess_now = get_session(user_id)
+            if sess_now.is_active and sess_now.gale_level > 0 and sess_now.gale_level <= MAX_GALE:
+                # Misma apuesta que se perdió (GALE = repetir el lado)
+                gale_side = sess_before.pending_side  # 'P' o 'B'
+                if gale_side in ("P", "B") and sess_before.confirmed_msg_id:
+                    gale_text = text_entrada_confirmada(gale_side, last_result=result) + f"\n\n🔁 <b>GALE {sess_now.gale_level}/{MAX_GALE}</b>"
+                    gale_confirmed_id = await channel_send(context, gale_text, reply_to=sess_before.confirmed_msg_id)
+
+                    # preparar apuesta pendiente GALE (monto siguiente)
+                    bet_amount = calc_next_bet(sess_now)
+                    set_session(
+                        user_id,
+                        confirmed_msg_id=gale_confirmed_id,
+                        pending_side=gale_side,
+                        pending_bet=bet_amount,
+                        awaiting_outcome=1,
+                        # limpiar candidato/posible para evitar duplicados
+                        possible_msg_id=None,
+                        last_candidate_side=None,
+                        candidate_score=0,
+                        candidate_ts=0
+                    )
+
+                    await ensure_dashboard(update, context, user_id)
+                    return
+
+            # Si perdió y YA NO hay más GALE (gale_level reseteó a 0), cerramos ciclo también
+            if sess_after.gale_level == 0:
+                set_session(
+                    user_id,
+                    possible_msg_id=None,
+                    confirmed_msg_id=None,
+                    last_candidate_side=None,
+                    candidate_score=0,
+                    candidate_ts=0
+                )
+
         # stop/take
         stop_hit = check_stop_take(sess_after)
         if stop_hit in ("STOP_LOSS", "TAKE_PROFIT"):
             stop_session(user_id)
+
+        # ✅ Regla AnaPrime: si hay una entrada activa esperando resultado, NO generar nuevas POSIBLE/CONFIRMADA
+        sess_guard = get_session(user_id)
+        if sess_guard.awaiting_outcome:
+            await ensure_dashboard(update, context, user_id)
+            return
 
         # 3) señales al canal por score (POSIBLE>=60, CONFIRMADA>=75)
         seq = get_last_results(user_id, 300)
