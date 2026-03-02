@@ -31,10 +31,10 @@ log = logging.getLogger("bacbo")
 DB_PATH = "bacbo.db"
 
 # Lógica / estrategia (conservador)
-WINDOW_SHORT = 12          # lectura rápida (más sensible)
-WINDOW_LONG = 30           # lectura estable
-MIN_PB_FOR_STATS = 10      # mínimo de P/B para confiar en chop/racha
-TIE_AVOID_THRESHOLD = 2    # más conservador
+WINDOW_SHORT = 12
+WINDOW_LONG = 30
+MIN_PB_FOR_STATS = 10
+TIE_AVOID_THRESHOLD = 2
 
 STOP_LOSS_PCT = 10
 TAKE_PROFIT_PCT = 5
@@ -43,16 +43,16 @@ BASE_BET_PCT = 2.0
 ALLOWED_BETS = [5000, 10000, 25000, 125000, 500000, 2500000]
 
 # Dashboard
-INACTIVITY_SECONDS = 30 * 60  # 30 minutos
+INACTIVITY_SECONDS = 30 * 60
 ROADMAP_ROWS = 6
-ROADMAP_MAX_COLS_TO_RENDER = 60  # evita reventar el mensaje
+ROADMAP_MAX_COLS_TO_RENDER = 60
 
 # Señales por score (AnaPrime-like)
 POSSIBLE_SCORE = 60
 CONFIRMED_SCORE = 75
-CONFIRM_SAME_SIDE_REQUIRED = True  # confirmar solo si mantiene el lado (más conservador)
+CONFIRM_SAME_SIDE_REQUIRED = True
 
-MAX_GALE = 2  # ✅ importante: máximo 2 gales (AnaPrime)
+MAX_GALE = 2  # máximo 2 gales
 
 # ======================
 # ENV
@@ -122,7 +122,7 @@ def init_db():
     )
     """)
 
-    # --- MIGRACIÓN: agregar columnas si la tabla ya existía ---
+    # MIGRACIÓN columnas
     cur.execute("PRAGMA table_info(session)")
     cols = {r[1] for r in cur.fetchall()}
 
@@ -256,7 +256,6 @@ def clear_rounds(user_id: int):
 # UTILS
 # ======================
 def side_to_ball(side: str) -> str:
-    # P=PLAYER 🔵, B=BANKER 🔴, T=TIE 🟠
     if side == "P":
         return "🔵"
     if side == "B":
@@ -397,7 +396,6 @@ def is_danger_table(seq: List[str]) -> Tuple[bool, str]:
     return False, ""
 
 
-# ===== SCORE ENGINE =====
 def compute_signal_score(seq: List[str], sess: SessionState) -> Tuple[int, Optional[str], str]:
     if len(seq) < 12:
         return 0, None, "Pocas rondas (min 12)."
@@ -600,7 +598,7 @@ async def safe_delete_message(bot, chat_id: int, msg_id: int):
         return
 
 
-# ✅✅✅ DASHBOARD ÚNICO
+# ✅ DASHBOARD ÚNICO
 async def ensure_dashboard(update: Optional[Update], context: ContextTypes.DEFAULT_TYPE, user_id: int):
     sess = get_session(user_id)
     seq = get_last_results(user_id, 300)
@@ -640,7 +638,7 @@ async def ensure_dashboard(update: Optional[Update], context: ContextTypes.DEFAU
 
 
 # ======================
-# CHANNEL MESSAGES (AnaPrime style)
+# CHANNEL MESSAGES
 # ======================
 def text_posible_entrada() -> str:
     return (
@@ -859,6 +857,21 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "dash_add":
         seq = get_last_results(user_id, 300)
         text = build_dashboard_text(seq, sess)
+
+        # ✅✅✅ BLOQUEO: si no hay banca iniciada, NO permitir registrar resultados
+        if not sess.is_active:
+            try:
+                await q.edit_message_text(
+                    text=text + "\n\n⚠️ <b>Primero INICIA APUESTA</b> (pon tu bank) para poder registrar resultados.",
+                    reply_markup=dashboard_keyboard(),
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+            except BadRequest:
+                await ensure_dashboard(update, context, user_id)
+            return
+
+        # si sí está activa, abrir teclado de resultados
         try:
             await q.edit_message_text(
                 text=text + "\n\n<b>➕ Registrar resultado:</b>",
@@ -907,8 +920,25 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ensure_dashboard(update, context, user_id)
         return
 
+    # ============ RESULT ADD ============
     if data.startswith("add_"):
-        result = data.split("_", 1)[1]
+        # ✅✅✅ BLOQUEO extra: si por alguna razón llega aquí sin apuesta iniciada
+        sess_check = get_session(user_id)
+        if not sess_check.is_active:
+            seq = get_last_results(user_id, 300)
+            text = build_dashboard_text(seq, sess_check)
+            try:
+                await q.edit_message_text(
+                    text=text + "\n\n⚠️ <b>No puedes registrar resultados</b> sin iniciar la apuesta (bank).",
+                    reply_markup=dashboard_keyboard(),
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+            except BadRequest:
+                await ensure_dashboard(update, context, user_id)
+            return
+
+        result = data.split("_", 1)[1]  # P/B/T
         add_round(user_id, result)
 
         sess_before = get_session(user_id)
@@ -1003,7 +1033,7 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             set_session(user_id, last_candidate_side=side, candidate_score=score, candidate_ts=now_ts)
 
-        else:
+        else:  # CONFIRMED
             can_confirm = True
             if CONFIRM_SAME_SIDE_REQUIRED and sess.last_candidate_side and side != sess.last_candidate_side:
                 can_confirm = False
@@ -1037,7 +1067,7 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ======================
-# WEBHOOK + FLASK (UN SOLO FLASK)
+# WEBHOOK + FLASK
 # ======================
 flask_app = Flask(__name__)
 tg_app: Optional[Application] = None
@@ -1098,7 +1128,7 @@ def start_telegram_in_thread():
         await tg_app.start()
         log.info("✅ Bot iniciado (WEBHOOK).")
 
-    # ✅✅✅ FIX DEL ERROR: debe ser runner() (corutina), no runner (función)
+    # ✅ FIX: runner() es corutina
     tg_loop.create_task(runner())
     tg_loop.run_forever()
 
