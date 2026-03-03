@@ -648,7 +648,7 @@ def text_posible_entrada() -> str:
 
 
 def text_entrada_confirmada(bet_side: str, last_result: str) -> str:
-    ingresar = side_to_ball(opposite_side(bet_side))
+    ingresar = side_to_ball(last_result)   # <-- usar el último resultado real
     apuesta = side_to_ball(bet_side)
 
     return (
@@ -1041,8 +1041,8 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if can_confirm and sess.possible_msg_id is not None and sess.candidate_score >= POSSIBLE_SCORE:
                 await channel_delete(context, sess.possible_msg_id)
 
-                last_result = seq[-1] if seq else side
-                confirmed_id = await channel_send(context, text_entrada_confirmada(side, last_result))
+                last_result = seq[-1] if seq else bet_side
+confirmed_id = await channel_send(context, text_entrada_confirmada(side, last_result))
                 set_session(
                     user_id,
                     possible_msg_id=None,
