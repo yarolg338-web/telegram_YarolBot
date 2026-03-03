@@ -429,7 +429,7 @@ def compute_signal_score(seq: List[str], sess: SessionState) -> Tuple[int, Optio
         score -= 20
         reasons.append("ties largo")
 
-    if 0.40 <= cr_s <= 0.60 and 0.40 <= cr_l <= 0.60:
+    if 0.45 <= cr_s <= 0.55 and 0.45 <= cr_l <= 0.55 and streak_len < 4:
         score -= 35
         reasons.append("chop medio")
 
