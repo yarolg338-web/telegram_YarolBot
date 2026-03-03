@@ -974,16 +974,26 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await channel_send(context, text_tie(), reply_to=sess_before.confirmed_msg_id)
 
-        # ✅ 6) resets por WIN/TIE (antes de anti-tilt)
+        # ✅ 6) WIN/TIE: cerrar ciclo + borrar POSIBLE del canal (si existía)
+        reset_done = False
+
         if outcome in ("WIN", "TIE"):
+            # borrar posible del canal usando el estado ANTES del reset
+            if sess_before.possible_msg_id:
+                await channel_delete(context, sess_before.possible_msg_id)
+
             set_session(
                 user_id,
                 possible_msg_id=None,
                 confirmed_msg_id=None,
+                pending_side=None,
+                pending_bet=0,
+                awaiting_outcome=0,
                 last_candidate_side=None,
                 candidate_score=0,
                 candidate_ts=0
             )
+            reset_done = True
 
         # ✅ 7) manejo de GALE (si LOSE)
         if outcome == "LOSE":
@@ -1010,7 +1020,13 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await ensure_dashboard(update, context, user_id)
                     return
 
-            if sess_after.gale_level == 0:
+        # ✅ si fue LOSE y ya NO hay más gales (gale_level volvió a 0), limpiar ciclo completo
+        if outcome == "LOSE":
+            sess_after2 = get_session(user_id)
+            if sess_after2.gale_level == 0:
+                if sess_before.possible_msg_id:
+                    await channel_delete(context, sess_before.possible_msg_id)
+
                 set_session(
                     user_id,
                     possible_msg_id=None,
@@ -1019,6 +1035,7 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     candidate_score=0,
                     candidate_ts=0
                 )
+                reset_done = True
 
         # ✅ 8) activar anti-tilt AL FINAL (con estado final de la ronda)
         sess_guard = get_session(user_id)
@@ -1026,6 +1043,7 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             danger, why = is_danger_table(seq)
             if danger:
                 set_session(user_id, danger_cooldown=2)
+                sess_guard = get_session(user_id)  # opcional
         
         
         stop_hit = check_stop_take(sess_after)
@@ -1051,7 +1069,16 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if state == "NONE" or side is None:
             if sess.possible_msg_id is not None:
                 await channel_delete(context, sess.possible_msg_id)
-            set_session(user_id, possible_msg_id=None, last_candidate_side=None, candidate_score=0, candidate_ts=0)
+
+            #  ✅ no hacer reset otra vez si ya lo hicimos por WIN/TIE o por fin de GALE
+            if not reset_done:
+                set_session(
+                    user_id,
+                    possible_msg_id=None,
+                    last_candidate_side=None,
+                    candidate_score=0,
+                    candidate_ts=0
+                )
 
         elif state == "POSSIBLE":
             if sess.possible_msg_id is not None and sess.last_candidate_side and side != sess.last_candidate_side:
