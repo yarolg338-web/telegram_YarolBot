@@ -1025,19 +1025,20 @@ if sess_cd.danger_cooldown > 0:
             await ensure_dashboard(update, context, user_id)
             return
 
-        seq = get_last_results(user_id, 300)
+        
         sess = get_session(user_id)
+        seq = get_last_results(user_id, 300)
 
-     # ✅ armar anti-tilt SOLO si está apagado
+        # ✅ armar anti-tilt SOLO si está apagado
         sess_guard = get_session(user_id)
         if sess_guard.danger_cooldown == 0:
             danger, why = is_danger_table(seq)
             if danger:
                 set_session(user_id, danger_cooldown=2)
-                # refrescar sess para que el dashboard muestre ANTI-TILT inmediato
                 sess_guard = get_session(user_id)
 
         state, side, score, detail = decide_with_score(seq, sess_guard)
+     
         now_ts = int(time.time())
 
         if state == "CONFIRMED" and sess.possible_msg_id is None:
