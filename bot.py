@@ -955,9 +955,10 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = data.split("_", 1)[1]  # P/B/T
         add_round(user_id, result)
         # ✅ bajar cooldown 1 por ronda registrada
-sess_cd = get_session(user_id)
-if sess_cd.danger_cooldown > 0:
-    set_session(user_id, danger_cooldown=max(0, sess_cd.danger_cooldown - 1))
+        sess_cd = get_session(user_id)
+        if sess_cd.danger_cooldown > 0:
+            set_session(user_id, danger_cooldown=max(0, sess_cd.danger_cooldown - 1))
+        
         sess_before = get_session(user_id)
         sess_after, outcome = settle_pending(sess_before, result)
 
