@@ -944,7 +944,6 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except BadRequest:
                 await ensure_dashboard(update, context, user_id)
             return
-
         # ✅ 1) registrar resultado
         result = data.split("_", 1)[1]  # P/B/T
         add_round(user_id, result)
@@ -957,26 +956,16 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # ✅ 3) recalcular secuencia (ya con el nuevo resultado)
         seq = get_last_results(user_id, 300)
 
-        # ✅ 4) encender anti-tilt SOLO si está apagado (evita que “suba” otra vez)
-        sess_guard = get_session(user_id)
-        if sess_guard.danger_cooldown == 0:
-            danger, why = is_danger_table(seq)
-            if danger:
-                set_session(user_id, danger_cooldown=2)
-                sess_guard = get_session(user_id)  # refrescar estado para dashboard
-
-        # ✅ 5) ahora sí liquidar apuesta si había pendiente
+        # ✅ 4) liquidar apuesta si había pendiente (primero!)
         sess_before = get_session(user_id)
         sess_after, outcome = settle_pending(sess_before, result)
 
-        # ... (de aquí para abajo deja TODO igual como lo tienes)
-        
-        sess_before = get_session(user_id)
-        sess_after, outcome = settle_pending(sess_before, result)
+        log.info(
+            "OUTCOME=%s pending_side=%s result=%s confirmed_msg_id=%s gale_after=%s",
+            outcome, sess_before.pending_side, result, sess_before.confirmed_msg_id, sess_after.gale_level
+        )
 
-        log.info("OUTCOME=%s pending_side=%s result=%s confirmed_msg_id=%s gale_after=%s",
-                 outcome, sess_before.pending_side, result, sess_before.confirmed_msg_id, sess_after.gale_level)
-
+        # ✅ 5) mensajes al canal según outcome
         if outcome in ("WIN", "LOSE", "TIE") and sess_before.confirmed_msg_id:
             if outcome == "WIN":
                 await channel_send(context, text_green(result_side=result), reply_to=sess_before.confirmed_msg_id)
@@ -985,6 +974,7 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await channel_send(context, text_tie(), reply_to=sess_before.confirmed_msg_id)
 
+        # ✅ 6) resets por WIN/TIE (antes de anti-tilt)
         if outcome in ("WIN", "TIE"):
             set_session(
                 user_id,
@@ -995,9 +985,10 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 candidate_ts=0
             )
 
+        # ✅ 7) manejo de GALE (si LOSE)
         if outcome == "LOSE":
             sess_now = get_session(user_id)
-            if sess_now.is_active and sess_now.gale_level > 0 and sess_now.gale_level <= MAX_GALE:
+            if sess_now.is_active and 0 < sess_now.gale_level <= MAX_GALE:
                 gale_side = sess_before.pending_side
                 if gale_side in ("P", "B") and sess_before.confirmed_msg_id:
                     gale_text = text_entrada_confirmada(gale_side, last_result=result) + f"\n\n🔁 <b>GALE {sess_now.gale_level}/{MAX_GALE}</b>"
@@ -1029,6 +1020,14 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     candidate_ts=0
                 )
 
+        # ✅ 8) activar anti-tilt AL FINAL (con estado final de la ronda)
+        sess_guard = get_session(user_id)
+        if sess_guard.danger_cooldown == 0:
+            danger, why = is_danger_table(seq)
+            if danger:
+                set_session(user_id, danger_cooldown=2)
+        
+        
         stop_hit = check_stop_take(sess_after)
         if stop_hit in ("STOP_LOSS", "TAKE_PROFIT"):
             stop_session(user_id)
@@ -1038,20 +1037,12 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await ensure_dashboard(update, context, user_id)
             return
 
-        
         sess = get_session(user_id)
         seq = get_last_results(user_id, 300)
 
-        # ✅ armar anti-tilt SOLO si está apagado
-        sess_guard = get_session(user_id)
-        if sess_guard.danger_cooldown == 0:
-            danger, why = is_danger_table(seq)
-            if danger:
-                set_session(user_id, danger_cooldown=2)
-                sess_guard = get_session(user_id)
-
+        sess_guard = get_session(user_id)  # ✅ refrescar para usar danger_cooldown actualizado
         state, side, score, detail = decide_with_score(seq, sess_guard)
-     
+        
         now_ts = int(time.time())
 
         if state == "CONFIRMED" and sess.possible_msg_id is None:
