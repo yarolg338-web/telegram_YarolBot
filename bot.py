@@ -417,9 +417,10 @@ def compute_signal_score(seq: List[str], sess: SessionState) -> Tuple[int, Optio
     ties_l = count_ties(win_l)
     cr_s = chop_rate(win_s)
     cr_l = chop_rate(win_l)
-    streak_side, streak_len = current_streak(win_s)
-    # 🔒 filtro anti-racha larga (solo P/B)
-    if streak_side in ("P", "B") and streak_len >= 6:
+    streak_side, streak_len = current_streak(seq)  # 👈 CAMBIO IMPORTANTE
+
+    # 🔒 FILTRO ANTI-RACHA LARGA (GLOBAL)
+    if streak_len >= 6:
         return 0, None, "Racha extendida (riesgo de ruptura)."
     score = 0
     reasons = []
