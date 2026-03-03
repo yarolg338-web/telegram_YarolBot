@@ -1039,11 +1039,16 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # ✅ 8) activar anti-tilt AL FINAL (con estado final de la ronda)
         sess_guard = get_session(user_id)
-        if sess_guard.danger_cooldown == 0:
-            danger, why = is_danger_table(seq)
-            if danger:
-                set_session(user_id, danger_cooldown=2)
-                sess_guard = get_session(user_id)  # opcional
+        danger, why = is_danger_table(seq)
+
+        # 🔎 DEBUG: ver exactamente por qué se activa
+        st_side, st_len = current_streak(seq)
+        cr_now = chop_rate(seq[-WINDOW_LONG:] if len(seq) >= WINDOW_LONG else seq)
+        log.info("DANGER_CHECK danger=%s why=%s streak=%s x%d chop=%.2f len=%d",
+                 danger, why, st_side, st_len, cr_now, len(seq))
+
+        if sess_guard.danger_cooldown == 0 and danger:
+            set_session(user_id, danger_cooldown=2)
         
         
         stop_hit = check_stop_take(sess_after)
