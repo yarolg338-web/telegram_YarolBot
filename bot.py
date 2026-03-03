@@ -1038,8 +1038,7 @@ if sess_cd.danger_cooldown > 0:
                 # refrescar sess para que el dashboard muestre ANTI-TILT inmediato
                 sess_guard = get_session(user_id)
 
-state, side, score, detail = decide_with_score(seq, sess_guard)
-        state, side, score, detail = decide_with_score(seq, sess)
+        state, side, score, detail = decide_with_score(seq, sess_guard)
         now_ts = int(time.time())
 
         if state == "CONFIRMED" and sess.possible_msg_id is None:
