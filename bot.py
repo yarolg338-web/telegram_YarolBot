@@ -945,12 +945,31 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await ensure_dashboard(update, context, user_id)
             return
 
+        # ✅ 1) registrar resultado
         result = data.split("_", 1)[1]  # P/B/T
         add_round(user_id, result)
-        # ✅ bajar cooldown 1 por ronda registrada
+
+        # ✅ 2) bajar cooldown 1 por ronda registrada
         sess_cd = get_session(user_id)
         if sess_cd.danger_cooldown > 0:
             set_session(user_id, danger_cooldown=max(0, sess_cd.danger_cooldown - 1))
+
+        # ✅ 3) recalcular secuencia (ya con el nuevo resultado)
+        seq = get_last_results(user_id, 300)
+
+        # ✅ 4) encender anti-tilt SOLO si está apagado (evita que “suba” otra vez)
+        sess_guard = get_session(user_id)
+        if sess_guard.danger_cooldown == 0:
+            danger, why = is_danger_table(seq)
+            if danger:
+                set_session(user_id, danger_cooldown=2)
+                sess_guard = get_session(user_id)  # refrescar estado para dashboard
+
+        # ✅ 5) ahora sí liquidar apuesta si había pendiente
+        sess_before = get_session(user_id)
+        sess_after, outcome = settle_pending(sess_before, result)
+
+        # ... (de aquí para abajo deja TODO igual como lo tienes)
         
         sess_before = get_session(user_id)
         sess_after, outcome = settle_pending(sess_before, result)
