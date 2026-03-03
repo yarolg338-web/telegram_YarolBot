@@ -955,12 +955,9 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = data.split("_", 1)[1]  # P/B/T
         add_round(user_id, result)
         # ✅ bajar cooldown 1 por ronda registrada
-        sess_cd = get_session(user_id)
-        if sess_cd.danger_cooldown > 0:
-            set_session(
-                 user_id, 
-                 danger_cooldown=max(0, sess_cd.danger_cooldown - 1)
-                )
+sess_cd = get_session(user_id)
+if sess_cd.danger_cooldown > 0:
+    set_session(user_id, danger_cooldown=max(0, sess_cd.danger_cooldown - 1))
         sess_before = get_session(user_id)
         sess_after, outcome = settle_pending(sess_before, result)
 
@@ -1030,6 +1027,18 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         seq = get_last_results(user_id, 300)
         sess = get_session(user_id)
+        seq = get_last_results(user_id, 300)
+
+         # ✅ armar anti-tilt SOLO si está apagado
+           sess_guard = get_session(user_id)
+        if sess_guard.danger_cooldown == 0:
+             danger, why = is_danger_table(seq)
+           if danger:
+        set_session(user_id, danger_cooldown=2)
+        # refrescar sess para que el dashboard muestre ANTI-TILT inmediato
+        sess_guard = get_session(user_id)
+
+state, side, score, detail = decide_with_score(seq, sess_guard)
         state, side, score, detail = decide_with_score(seq, sess)
         now_ts = int(time.time())
 
