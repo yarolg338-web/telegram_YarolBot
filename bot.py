@@ -414,6 +414,10 @@ def compute_signal_score(seq: List[str], sess: SessionState) -> Tuple[int, Optio
 
     danger, why = is_danger_table(seq)
     if danger:
+        # activar anti-tilt por 2 rondas
+        if sess.danger_cooldown == 0:
+            set_session(sess.user_id, danger_cooldown=2)
+
         return 0, None, f"Mesa peligrosa: {why}"
 
     ties_s = count_ties(win_s)
