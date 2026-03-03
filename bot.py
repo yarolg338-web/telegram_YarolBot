@@ -1038,11 +1038,15 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if CONFIRM_SAME_SIDE_REQUIRED and sess.last_candidate_side and side != sess.last_candidate_side:
                 can_confirm = False
 
-            if can_confirm and sess.possible_msg_id is not None and sess.candidate_score >= POSSIBLE_SCORE:
+                        if can_confirm and sess.possible_msg_id is not None and sess.candidate_score >= POSSIBLE_SCORE:
                 await channel_delete(context, sess.possible_msg_id)
 
-                last_result = seq[-1] if seq else bet_side
-confirmed_id = await channel_send(context, text_entrada_confirmada(side, last_result))
+                last_result = seq[-1] if seq else side  # <-- side, no bet_side
+                confirmed_id = await channel_send(
+                    context,
+                    text_entrada_confirmada(side, last_result)
+                )
+
                 set_session(
                     user_id,
                     possible_msg_id=None,
