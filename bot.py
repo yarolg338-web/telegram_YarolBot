@@ -357,17 +357,20 @@ def chop_rate(seq: List[str]) -> float:
 def current_streak(seq: List[str]) -> Tuple[Optional[str], int]:
     if not seq:
         return None, 0
+
     last = seq[-1]
     if last == "T":
         return None, 0
+
     k = 1
     for i in range(len(seq) - 2, -1, -1):
+        if seq[i] == "T":
+            break  # ✅ el TIE corta la racha
         if seq[i] == last:
             k += 1
-        elif seq[i] == "T":
-            continue
         else:
             break
+
     return last, k
 
 
@@ -554,6 +557,11 @@ def stats_block(seq: List[str]) -> str:
 
 def reco_block(seq: List[str], sess: SessionState) -> str:
     state, side, score, detail = decide_with_score(seq, sess)
+
+    # ✅ Mantener dashboard 1:1 con la lógica del canal
+    # (No mostramos CONFIRMADA si todavía no existe un mensaje POSIBLE previo)
+    if state == "CONFIRMED" and sess.possible_msg_id is None:
+        state = "POSSIBLE"
 
     if state == "NONE" or side is None:
         return "🧠 <b>RECOMENDACIONES</b>\n• <b>NO BET</b>\n• " + detail
@@ -943,7 +951,13 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         result = data.split("_", 1)[1]  # P/B/T
         add_round(user_id, result)
-
+        # ✅ bajar cooldown 1 por ronda registrada
+        sess_cd = get_session(user_id)
+        if sess_cd.danger_cooldown > 0:
+            set_session(
+                 user_id, 
+                 danger_cooldown=max(0, sess_cd.danger_cooldown - 1)
+                )
         sess_before = get_session(user_id)
         sess_after, outcome = settle_pending(sess_before, result)
 
