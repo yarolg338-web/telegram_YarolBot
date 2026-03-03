@@ -439,7 +439,7 @@ def compute_signal_score(seq: List[str], sess: SessionState) -> Tuple[int, Optio
 
     side = None
 
-    if streak_side in ("P", "B") and streak_len >= 4 and cr_l < 0.65:
+    if streak_side in ("P", "B") and streak_len >= 3 and cr_l < 0.65:
         side = streak_side
         score += 85
         reasons.append(f"racha {streak_side}x{streak_len}")
