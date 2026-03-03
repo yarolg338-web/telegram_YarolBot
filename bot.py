@@ -1027,7 +1027,6 @@ if sess_cd.danger_cooldown > 0:
 
         seq = get_last_results(user_id, 300)
         sess = get_session(user_id)
-        seq = get_last_results(user_id, 300)
 
      # ✅ armar anti-tilt SOLO si está apagado
         sess_guard = get_session(user_id)
