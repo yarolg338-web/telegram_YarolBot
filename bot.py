@@ -412,13 +412,6 @@ def compute_signal_score(seq: List[str], sess: SessionState) -> Tuple[int, Optio
     if len(pb_l) < MIN_PB_FOR_STATS:
         return 0, None, "Pocos P/B para lectura sólida."
 
-    danger, why = is_danger_table(seq)
-    if danger:
-        # ✅ ENCIENDE anti-tilt si aún no estaba activo
-        if sess.danger_cooldown == 0:
-            set_session(sess.user_id, danger_cooldown=2)
-        return 0, None, f"Mesa peligrosa: {why}"
-
     ties_s = count_ties(win_s)
     ties_l = count_ties(win_l)
     cr_s = chop_rate(win_s)
