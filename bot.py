@@ -1065,10 +1065,10 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         sess_guard = get_session(user_id)  # ✅ refrescar para usar danger_cooldown actualizado
         state, side, score, detail = decide_with_score(seq, sess_guard)
-        
+        sess_now = get_session(user_id)  # ✅ estado fresco para todo lo que sigue
         now_ts = int(time.time())
 
-        if state == "CONFIRMED" and sess.possible_msg_id is None:
+        if state == "CONFIRMED" and sess_now.possible_msg_id is None:
             state = "POSSIBLE"
 
         if state == "NONE" or side is None:
@@ -1099,11 +1099,11 @@ async def on_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         else:  # CONFIRMED
             can_confirm = True
-            if CONFIRM_SAME_SIDE_REQUIRED and sess.last_candidate_side and side != sess.last_candidate_side:
+            if CONFIRM_SAME_SIDE_REQUIRED and sess_now.last_candidate_side and side != sess_now.last_candidate_side:
                 can_confirm = False
 
-            if can_confirm and sess.possible_msg_id is not None and sess.candidate_score >= POSSIBLE_SCORE:
-                await channel_delete(context, sess.possible_msg_id)
+            if can_confirm and sess_now.possible_msg_id is not None and sess_now.candidate_score >= POSSIBLE_SCORE:
+                await channel_delete(context, sess_now.possible_msg_id)
 
                 last_result = seq[-1] if seq else side
                 confirmed_id = await channel_send(
