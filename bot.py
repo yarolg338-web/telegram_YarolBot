@@ -419,7 +419,7 @@ def compute_signal_score(seq: List[str], sess: SessionState) -> Tuple[int, Optio
     streak_side, streak_len = current_streak(seq)  # 👈 CAMBIO IMPORTANTE
 
     # 🔒 FILTRO ANTI-RACHA LARGA (GLOBAL)
-    if streak_len >= 6:
+    if streak_len >= 5:
         return 0, None, "Racha extendida (riesgo de ruptura)."
     score = 0
     reasons = []
@@ -440,6 +440,9 @@ def compute_signal_score(seq: List[str], sess: SessionState) -> Tuple[int, Optio
         reasons.append("ventanas no concuerdan")
 
     side = None
+    
+    if streak_len == 4:
+        score -= 10
 
     if streak_side in ("P", "B") and streak_len >= 3 and cr_l < 0.65:
         side = streak_side
